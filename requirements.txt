@@ -1,0 +1,5 @@
+aiogram>=3.4,<4
+anthropic>=0.40
+sentence-transformers>=3.0
+chromadb>=0.5
+python-dotenv>=1.0
