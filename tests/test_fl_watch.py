@@ -146,6 +146,18 @@ check("в блоки попали Word и Excel, rar пропущен с при�
       sorted(rd) == ["ТЗ.docx", "смета.xlsx"] and sk == ["архив.rar (формат .rar не читаю)"] and all(b["type"] == "text" for b in bl))
 check("Kwork: заказ дешевле 2 500 ₽ отсеян, ровно 2 500 — остаётся",
       [kw.skipped({"name": "Бот", "category_id": "41", "priceLimit": p}) for p in ("2000.00", "2500.00")] == [True, False])
+(tmp / "фото.png").write_bytes(b"\xff\xd8\xff\xe0" + b"0" * 50)       # JPEG под видом .png — как прислал заказчик
+(tmp / "не-картинка.jpg").write_bytes(b"<html>")
+bl2, rd2, sk2 = at.to_blocks([tmp / "фото.png", tmp / "не-картинка.jpg"])
+check("картинка: тип по содержимому, а не по расширению; не-картинка пропущена",
+      [b["source"]["media_type"] for b in bl2 if b["type"] == "image"] == ["image/jpeg"]
+      and sk2 == ["не-картинка.jpg (не картинка, хотя так назван)"])
+check("FL: ссылки на вложения со страницы заказа",
+      at.fl_links('<div class="base-attach-class"><a class="x"href=\'https://www.fl.ru/download/files/a/projects/f_1.docx\' '
+                  'target="_blank">ТЗ &amp; макет.docx</a><a href="https://www.fl.ru/download/files/b/f_2.jpg">фото.jpg</a>'
+                  '</div><a href="https://www.fl.ru/about/x.pdf">Правила</a>')
+      == [{"name": "ТЗ & макет.docx", "url": "https://www.fl.ru/download/files/a/projects/f_1.docx"},
+          {"name": "фото.jpg", "url": "https://www.fl.ru/download/files/b/f_2.jpg"}])
 check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
 check("Kwork: вложения из JSON попадают в заказ",
       kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
