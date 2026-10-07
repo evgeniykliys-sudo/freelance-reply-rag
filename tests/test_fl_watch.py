@@ -158,6 +158,13 @@ check("FL: ссылки на вложения со страницы заказа
                   '</div><a href="https://www.fl.ru/about/x.pdf">Правила</a>')
       == [{"name": "ТЗ & макет.docx", "url": "https://www.fl.ru/download/files/a/projects/f_1.docx"},
           {"name": "фото.jpg", "url": "https://www.fl.ru/download/files/b/f_2.jpg"}])
+import dataclasses  # noqa: E402
+
+lay = dataclasses.replace(k0, category="Kwork / Разработка и IT / Верстка")
+check("Kwork: в рубрике без портфолио — предупреждение, в «Создание сайта» и у ботов — нет",
+      "нет портфолио в рубрике «Верстка»" in fw.card(lay, {}, good)
+      and "нет портфолио" not in fw.card(k0, {}, good)
+      and "нет портфолио" not in fw.card(dataclasses.replace(k0, category="Kwork / Разработка и IT / Скрипты, боты и mini apps"), {}, good))
 check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
 check("Kwork: вложения из JSON попадают в заказ",
       kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
