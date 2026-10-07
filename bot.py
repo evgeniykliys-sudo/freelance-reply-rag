@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, FSInputFile, ForceReply, InlineKeyboard
 from dotenv import load_dotenv
 
 import fl_submit
+import kwork_submit
 import fl_watch
 from rag import draft_reply
 
@@ -57,12 +58,13 @@ async def on_edit(cb: CallbackQuery):
 
 
 def send_kb(order_id: str, url: str, left) -> InlineKeyboardMarkup:
+    site = "Kwork" if "kwork.ru" in url else "FL.ru"
     tail = f" (останется {left - 1})" if isinstance(left, int) else ""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🚀 Отправить на FL.ru{tail}", callback_data=f"send:{order_id}")],
+        [InlineKeyboardButton(text=f"🚀 Отправить на {site}{tail}", callback_data=f"send:{order_id}")],
         [InlineKeyboardButton(text="✏️ Править", callback_data=f"edit:{order_id}"),
          InlineKeyboardButton(text="Отмена", callback_data=f"cancel:{order_id}")],
-        [InlineKeyboardButton(text="Открыть заказ на FL.ru", url=url)]])
+        [InlineKeyboardButton(text=f"Открыть заказ на {site}", url=url)]])
 
 
 @dp.callback_query(F.data.startswith("ok:"))
@@ -79,14 +81,7 @@ async def on_approve(cb: CallbackQuery):
         await cb.answer("В черновике нет цены или срока — поправь через «Править»", show_alert=True)
         return
     if o.source == "kwork":
-        # автоотправка на Kwork — после входа в Kwork в том же Chrome; пока — текст для копирования
-        c.execute("update drafts set status='approved' where order_id=?", (order_id,))
-        c.commit()
-        await cb.answer("Утверждено")
-        await cb.message.answer(fl_watch.card(o, tri, d, ver, "approved"), parse_mode="HTML",
-                                disable_web_page_preview=True, reply_markup=kb(order_id, o.link, "approved"))
-        await cb.message.answer(f"Скопируй текст и вставь в предложение на Kwork (кнопка «Открыть заказ»): "
-                                f"цена {d['price']} ₽, срок {d['days']} дн.")
+        await approve_kwork(cb, c, o, d, order_id)
         return
     await cb.answer("Заполняю форму отклика…")
     wait = await cb.message.answer("⏳ Открываю заказ в Chrome и заполняю форму (не отправляю)…")
@@ -114,6 +109,30 @@ async def on_approve(cb: CallbackQuery):
                                   reply_markup=send_kb(order_id, o.link, st.get("left")))
 
 
+async def approve_kwork(cb: CallbackQuery, c, o, d, order_id: str):
+    await cb.answer("Заполняю форму предложения…")
+    wait = await cb.message.answer("⏳ Открываю заказ на Kwork в Chrome и заполняю форму (не отправляю)…")
+    try:
+        st = await kwork_submit.prepare(o.link, d["reply"], d["price"], d["days"], o.title, order_id)
+    except fl_submit.NotReady as e:
+        await wait.edit_text(f"⚠️ {e}")
+        return
+    except Exception:
+        logging.exception("kwork prepare")
+        await wait.edit_text("⚠️ Не получилось заполнить форму — открой заказ и предложи услугу вручную.")
+        return
+    c.execute("update drafts set status='approved' where order_id=?", (order_id,))
+    c.commit()
+    price = f"{st['price']:,}".replace(",", " ")
+    note = f" (поднял до минимума Kwork, в черновике {d['price']})" if st["price"] != d["price"] else ""
+    caption = (f"Форма заполнена, <b>ещё не отправлено</b>.\n💰 {price} ₽{note} · {st['term']}"
+               f"\n👥 предложений уже: {st['competitors']}"
+               + ("\n⚠️ Kwork подсветил контакты/стоп-слова в тексте — поправь" if st.get("stopwords") else ""))
+    await wait.delete()
+    await cb.message.answer_photo(FSInputFile(st["shot"]), caption=caption, parse_mode="HTML",
+                                  reply_markup=send_kb(order_id, o.link, None))
+
+
 @dp.callback_query(F.data.startswith("send:"))
 async def on_send(cb: CallbackQuery):
     order_id = cb.data.split(":", 1)[1]
@@ -123,15 +142,19 @@ async def on_send(cb: CallbackQuery):
         await cb.answer("Не нашёл этот заказ", show_alert=True)
         return
     o, tri, d, status, _ = got
-    if status in ("sending", "sent_fl"):
+    if status in ("sending", "sent_fl", "sent_kw"):
         await cb.answer("Уже отправлено или отправляется", show_alert=True)
         return
     c.execute("update drafts set status='sending' where order_id=?", (order_id,))
     c.commit()
     await cb.answer("Отправляю…")
     await cb.message.edit_reply_markup(reply_markup=None)
+    kw = o.source == "kwork"
     try:
-        res = await fl_submit.submit(o.link, d["reply"], d["price"], d["days"], d.get("works", []), o.id)
+        if kw:
+            res = await kwork_submit.submit(o.link, d["reply"], d["price"], d["days"], o.title)
+        else:
+            res = await fl_submit.submit(o.link, d["reply"], d["price"], d["days"], d.get("works", []), o.id)
     except Exception as e:
         logging.exception("submit")
         c.execute("update drafts set status='approved' where order_id=?", (order_id,))
@@ -140,16 +163,20 @@ async def on_send(cb: CallbackQuery):
         await cb.message.answer(f"⚠️ Отклик не отправлен: {msg}. Проверь заказ вручную.",
                                 reply_markup=send_kb(order_id, o.link, None))
         return
-    c.execute("update drafts set status=? where order_id=?", ("sent_fl" if res["ok"] else "approved", order_id))
+    c.execute("update drafts set status=? where order_id=?",
+              (("sent_kw" if kw else "sent_fl") if res["ok"] else "approved", order_id))
     c.commit()
-    if res["ok"]:
+    if res["ok"] and kw:
+        await cb.message.answer("✅ Предложение отправлено заказчику на Kwork (видно в «Биржа → Мои предложения»).")
+    elif res["ok"]:
         await cb.message.answer(f"✅ Отклик отправлен заказчику и виден в «Мои отклики»."
                                 + (f"\n🎟 откликов осталось: {res['left']}" if res.get("left") is not None else ""))
     else:
-        await cb.message.answer("❓ Кнопку нажал, но в «Мои отклики» заказ не нашёл. Открой заказ и проверь вручную, "
-                                "прежде чем отправлять ещё раз (отклики платные).",
+        await cb.message.answer("❓ Кнопку нажал, но не убедился, что отклик ушёл. Открой заказ и проверь вручную, "
+                                "прежде чем отправлять ещё раз.",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [InlineKeyboardButton(text="Открыть заказ на FL.ru", url=o.link)]]))
+                                    [InlineKeyboardButton(text="Открыть заказ на " + ("Kwork" if kw else "FL.ru"),
+                                                          url=o.link)]]))
 
 
 @dp.callback_query(F.data.startswith("cancel:"))

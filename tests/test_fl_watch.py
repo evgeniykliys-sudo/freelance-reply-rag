@@ -111,6 +111,15 @@ LOGO = KW.replace('"wants":[', '"wants":[{"id":1,"name":"Нарисовать л
                   '"description":"x","priceLimit":"1000","category_id":"68","date_create":"2026-10-07 12:36:34"},')
 check("Kwork: логотипы и вектор отсеяны, сайт с «логотип» в описании остался",
       [o.id for o in kw.parse_page(LOGO.replace("Нужен сайт.", "Нужен сайт, логотип есть."), {})] == ["kw3264640"])
+import kwork_submit as ks  # noqa: E402
+
+TERMS = ["1 день", "2 дня", "5 дней", "7 дней", "10 дней", "2 недели", "3 недели", "1 месяц", "2 месяца"]
+check("Kwork срок: 8 дней → ближайший больший «10 дней», 12 → «2 недели», 90 → «2 месяца»",
+      (ks.pick_term(TERMS, 8), ks.pick_term(TERMS, 12), ks.pick_term(TERMS, 90)) == ("10 дней", "2 недели", "2 месяца"))
+check("Kwork цена подгоняется под рамки заказа",
+      (ks.fit_price(1500, {"min": 2000, "max": 30000}), ks.fit_price(50000, {"min": 2000, "max": 30000}),
+       ks.fit_price(8500, {"min": 2000, "max": None})) == (2000, 30000, 8500))
+check("Kwork: номер проекта из ссылки", ks.project_id("https://kwork.ru/projects/3264720/view") == "3264720")
 check("старый заказ без новых полей читается из базы", fw.order_from_json(fw.order_to_json(by["5524601"])).source == "fl")
 
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")
