@@ -125,7 +125,9 @@ async def approve_kwork(cb: CallbackQuery, c, o, d, order_id: str):
     c.commit()
     price = f"{st['price']:,}".replace(",", " ")
     note = f" (поднял до минимума Kwork, в черновике {d['price']})" if st["price"] != d["price"] else ""
-    caption = (f"Форма заполнена, <b>ещё не отправлено</b>.\n💰 {price} ₽{note} · {st['term']}"
+    net = f"{round(st['price'] * 0.8):,}".replace(",", " ")     # Kwork берёт 20% — в «Моих откликах» видна эта сумма
+    caption = (f"Форма заполнена, <b>ещё не отправлено</b>.\n💰 заказчик платит {price} ₽{note}, тебе {net} ₽ "
+               f"(−20% Kwork) · {st['term']}"
                f"\n👥 предложений уже: {st['competitors']}"
                + ("\n⚠️ Kwork подсветил контакты/стоп-слова в тексте — поправь" if st.get("stopwords") else ""))
     await wait.delete()
