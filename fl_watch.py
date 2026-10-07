@@ -46,7 +46,9 @@ MAX_AGE_HOURS = float(os.getenv("MAX_AGE_HOURS") or 2)
 # Kwork требует портфолио только в этих рубриках (для ботов и скриптов хватает кворков);
 # где работы уже есть — перечислить через запятую в KWORK_PORTFOLIO
 KWORK_NEED_PORTFOLIO = {"Создание сайта", "Верстка", "Мобильные приложения", "Игры"}
-KWORK_HAVE_PORTFOLIO = {x.strip() for x in (os.getenv("KWORK_PORTFOLIO") or "Создание сайта").split(",") if x.strip()}
+def kwork_have_portfolio() -> set[str]:
+    """Читаем при каждой карточке: .env загружается в bot.py уже после импорта этого модуля."""
+    return {x.strip() for x in (os.getenv("KWORK_PORTFOLIO") or "Создание сайта").split(",") if x.strip()}
 
 
 @dataclass
@@ -397,7 +399,7 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
     if d.get("works"):
         lines.append("📎 прикреплю: " + e("; ".join(titles.get(w, str(w)) for w in d["works"])))
     rubric = o.category.rsplit(" / ", 1)[-1]
-    if o.source == "kwork" and rubric in KWORK_NEED_PORTFOLIO and rubric not in KWORK_HAVE_PORTFOLIO:
+    if o.source == "kwork" and rubric in KWORK_NEED_PORTFOLIO and rubric not in kwork_have_portfolio():
         lines.append(f"⚠️ нет портфолио в рубрике «{e(rubric)}» — Kwork почти не показывает такие отклики; "
                      "сделать демо под эту рубрику")
     if tri.get("big"):
