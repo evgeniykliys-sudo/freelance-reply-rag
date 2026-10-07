@@ -105,6 +105,12 @@ cardk = fw.card(k0, {}, good)
 check("Kwork: карточка с площадкой, «готов до», откликами", all(x in cardk for x in ["[Kwork]", "готов до 200 000 ₽", "откликов: 9"]))
 check("Kwork: кнопка «Открыть заказ на Kwork»", fw.keyboard(k0.id, k0.link)["inline_keyboard"][1][0]["text"] == "Открыть заказ на Kwork")
 check("Kwork: в промпте площадка Kwork, не FL.ru", "Kwork" in fw.draft_system(k0) and "отзывы на FL.ru" not in fw.draft_system(k0))
+LOGO = KW.replace('"wants":[', '"wants":[{"id":1,"name":"Нарисовать логотип","description":"x","priceLimit":"1000","category_id":"28",'
+                  '"date_create":"2026-10-07 12:36:34"},{"id":2,"name":"Баннер","description":"x","priceLimit":"1000",'
+                  '"category_id":"25","date_create":"2026-10-07 12:36:34"},{"id":3,"name":"Перевести картинку в вектор SVG",'
+                  '"description":"x","priceLimit":"1000","category_id":"68","date_create":"2026-10-07 12:36:34"},')
+check("Kwork: логотипы и вектор отсеяны, сайт с «логотип» в описании остался",
+      [o.id for o in kw.parse_page(LOGO.replace("Нужен сайт.", "Нужен сайт, логотип есть."), {})] == ["kw3264640"])
 check("старый заказ без новых полей читается из базы", fw.order_from_json(fw.order_to_json(by["5524601"])).source == "fl")
 
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")

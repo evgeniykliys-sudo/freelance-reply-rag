@@ -19,6 +19,14 @@ MSK = timezone(timedelta(hours=3))
 # Разделы: 11 — Разработка и IT, 15 — Дизайн, 113 — Базы данных и клиентов (там парсинг)
 CATEGORIES = {11: "Разработка и IT", 15: "Дизайн", 113: "Базы данных и клиентов"}
 PAGES = 2
+# Логотипы и векторную графику не берём: весь раздел «Логотип и брендинг» и такие заказы в других разделах (по заголовку —
+# в описании «логотип есть» встречается и в заказах на сайт)
+SKIP_CATEGORIES = {"25"}
+SKIP_TITLE = re.compile(r"логотип|лого\b|логобук|вектор|svg|брендбук|айдентик|фирменн\w* стил|\blogo", re.I)
+
+
+def skipped(w: dict) -> bool:
+    return str(w.get("category_id")) in SKIP_CATEGORIES or bool(SKIP_TITLE.search(html.unescape(w.get("name") or "")))
 
 
 def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
@@ -34,6 +42,8 @@ def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
         return []
     out = []
     for w in arr:
+        if skipped(w):
+            continue
         try:
             published = datetime.strptime(w.get("date_active") or w["date_create"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK)
         except (KeyError, ValueError):
