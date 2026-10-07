@@ -20,7 +20,7 @@ import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -43,6 +43,39 @@ DISCOUNT = int(os.getenv("DISCOUNT_PCT") or 40)        # насколько ни
 MIN_PRICE = int(os.getenv("MIN_PRICE") or 1500)
 # заказы старше этого возраста не берём: на них уже набралось откликов (решение Евгения — 2 часа)
 MAX_AGE_HOURS = float(os.getenv("MAX_AGE_HOURS") or 2)
+# рабочие часы бота по Новосибирску (решение Евгения): ночью не следим, не тратим API и не будим уведомлениями
+WORK_HOURS = os.getenv("WORK_HOURS") or "8-22"
+NSK = timezone(timedelta(hours=7))
+
+
+def _work_bounds() -> tuple[int, int]:
+    start, end = (int(x) for x in WORK_HOURS.split("-"))
+    return start, end
+
+
+def in_work_hours(now: datetime | None = None) -> bool:
+    start, end = _work_bounds()
+    return start <= (now or datetime.now(NSK)).astimezone(NSK).hour < end
+
+
+def seconds_until_end(now: datetime | None = None) -> float:
+    """Сколько секунд до конца рабочего дня (22:00 по Новосибирску)."""
+    now = (now or datetime.now(NSK)).astimezone(NSK)
+    end = now.replace(hour=_work_bounds()[1], minute=0, second=0, microsecond=0)
+    return max(0.0, (end - now).total_seconds())
+
+
+def single_instance(port: int = int(os.getenv("BOT_LOCK_PORT") or 47231)):
+    """Один бот на ПК: Планировщик может запустить его и в 8:00, и при входе в Windows — второй сразу выходит.
+    Держим занятым локальный порт: он освобождается сам, даже если процесс упал."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        s.close()
+        return None
+    return s
 # Kwork требует портфолио только в этих рубриках (для ботов и скриптов хватает кворков);
 # где работы уже есть — перечислить через запятую в KWORK_PORTFOLIO
 KWORK_NEED_PORTFOLIO = {"Создание сайта", "Верстка", "Мобильные приложения", "Игры"}
