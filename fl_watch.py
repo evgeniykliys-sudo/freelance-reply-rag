@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
+import anthropic
 from anthropic import Anthropic
 
 import attachments
@@ -265,10 +266,10 @@ def draft_system(o: Order) -> str:
     return DRAFT_SYSTEM.replace("FL.ru", "Kwork") + extra
 
 
-def posting_blocks(o: Order, intro: str) -> list[dict]:
+def posting_blocks(o: Order, intro: str, with_files: bool = True) -> list[dict]:
     """Текст заказа + скачанные вложения (ТЗ, таблицы, картинки) одним сообщением для модели."""
     posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
-    blocks, _, _ = attachments.to_blocks(attachments.cached(o.id))
+    blocks = attachments.to_blocks(attachments.cached(o.id))[0] if with_files else []
     head = intro + f"Текст заказа:\n{posting}"
     if blocks:
         head += "\n\nК заказу приложены файлы — они ниже. Это часть ТЗ, учти их в отклике, цене и сроке."
@@ -279,9 +280,22 @@ def draft(o: Order) -> dict:
     posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
     chunks = rag.search(posting)[:6]
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
-    messages = [{"role": "user", "content": posting_blocks(o, f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\n")}]
+    intro = f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\n"
+    messages = [{"role": "user", "content": posting_blocks(o, intro)}]
     for attempt in range(2):
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=messages)
+        try:
+            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+                                                  messages=messages)
+        except anthropic.BadRequestError:
+            # модель не приняла вложение (битый файл, не тот формат) — пишем по тексту заказа, а не падаем
+            # (иначе заказ не отмечается просмотренным и бот повторяет его каждый проход)
+            if len(messages[0]["content"]) == 1:
+                raise
+            log.warning("заказ %s: вложения не приняты моделью, черновик без них", o.id)
+            o.att = {**(o.att or {}), "read": [], "error": "нейросеть не приняла вложения — черновик по тексту заказа"}
+            messages = [{"role": "user", "content": posting_blocks(o, intro, with_files=False)}]
+            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+                                                  messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
         reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
         price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
@@ -335,7 +349,11 @@ def revise(o: Order, d: dict, wish: str) -> dict:
             {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
                                         "(цена, срок, работы, факты), оставь ровно как было. Формат тот же: "
                                         "ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
-    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
+    try:
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
+    except anthropic.BadRequestError:
+        msgs[0]["content"] = posting_blocks(o, "", with_files=False)      # вложение не принято — правим без него
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
     text = "".join(b.text for b in r.content if b.type == "text")
     new = parse_draft(text)
     # если модель потеряла цену/срок/работы — оставляем прежние

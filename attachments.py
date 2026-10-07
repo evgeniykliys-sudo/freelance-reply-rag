@@ -72,6 +72,19 @@ def xlsx_text(path: Path) -> str:
     return "\n".join(out)
 
 
+def image_type(raw: bytes) -> str | None:
+    """Тип картинки по содержимому: заказчики шлют JPEG с расширением .png и наоборот, а модель это не прощает."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def to_blocks(paths: list[Path]) -> tuple[list[dict], list[str], list[str]]:
     """Файлы → блоки сообщения для Claude. Возвращает (блоки, что прочитано, что пропущено и почему)."""
     blocks, read, skipped, budget = [], [], [], MAX_TEXT
@@ -101,9 +114,14 @@ def to_blocks(paths: list[Path]) -> tuple[list[dict], list[str], list[str]]:
                 if p.stat().st_size > 5 * 1024 * 1024:
                     skipped.append(f"{p.name} (картинка больше 5 МБ)")
                     continue
+                raw = p.read_bytes()
+                kind = image_type(raw)
+                if not kind:
+                    skipped.append(f"{p.name} (не картинка, хотя так назван)")
+                    continue
                 blocks.append({"type": "text", "text": f"=== Вложение «{p.name}» (картинка ниже) ==="})
-                blocks.append({"type": "image", "source": {"type": "base64", "media_type": IMAGES[ext],
-                                                           "data": base64.b64encode(p.read_bytes()).decode()}})
+                blocks.append({"type": "image", "source": {"type": "base64", "media_type": kind,
+                                                           "data": base64.b64encode(raw).decode()}})
             else:
                 skipped.append(f"{p.name} (формат {ext or 'без расширения'} не читаю)")
                 continue
@@ -112,6 +130,17 @@ def to_blocks(paths: list[Path]) -> tuple[list[dict], list[str], list[str]]:
             log.warning("вложение %s: %s", p, e)
             skipped.append(f"{p.name} (не открылся)")
     return blocks, read, skipped
+
+
+def fl_links(page_html: str) -> list[dict]:
+    """Вложения со страницы заказа FL.ru (блок base-attach-class, ссылки /download/files/…)."""
+    out = []
+    # в исходнике FL.ru бывает href='…' без пробела перед ним — кавычки любые
+    for href, name in re.findall(r"""<a[^>]*href=["'](https://www\.fl\.ru/download/files/[^"']+)["'][^>]*>([^<]*)</a>""",
+                                 page_html):
+        if href not in [f["url"] for f in out]:
+            out.append({"name": html.unescape(name).strip(), "url": href})
+    return out
 
 
 def cached(order_id: str) -> list[Path]:
@@ -132,15 +161,9 @@ async def download(o) -> dict:
             ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
             try:
                 if o.source == "fl":
-                    page = await ctx.new_page()
-                    try:
-                        await page.goto(o.link, wait_until="domcontentloaded")
-                        await page.wait_for_timeout(1500)
-                        found = await page.evaluate("""() => [...document.querySelectorAll(
-                            '.base-attach-class a[href*="/download/"], a[href*="fl.ru/download/files/"]')]
-                            .map(a => ({name: a.innerText.trim(), url: a.href}))""")
-                    finally:
-                        await page.close()
+                    # страницу заказа читаем запросом с вашей сессией — без открытия вкладки в Chrome
+                    r = await ctx.request.get(o.link, timeout=30000)
+                    found = fl_links(await r.text())
                 if not found:
                     return {"files": [], "error": None}
                 d = DIR / o.id
