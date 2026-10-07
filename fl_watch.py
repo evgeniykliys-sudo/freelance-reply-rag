@@ -470,6 +470,7 @@ async def watch_forever(token, chat, every=180):
     sources = [("FL", fetch_all, every), ("Kwork", kwork_watch.fetch_all, int(os.getenv("KWORK_EVERY_SEC") or 120))]
     last = {name: 0.0 for name, *_ in sources}
     loop = asyncio.get_running_loop()
+    warned = 0.0      # когда последний раз предупреждали о закончившемся балансе API
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40), headers={"User-Agent": UA}) as s:
         while True:
             for name, fetch, period in sources:
@@ -480,8 +481,15 @@ async def watch_forever(token, chat, every=180):
                     res = await run_once(s, client, token, chat, fetch=fetch)
                     if res:
                         log.info("%s: новых %s, отправлено %s", name, len(res), sum(1 for _, _, d in res if d))
-                except Exception:
+                except Exception as e:
                     log.exception("ошибка прохода %s", name)
+                    # кончились деньги на API — без этого бот молча перестаёт присылать заказы; пишем раз в 3 часа
+                    if "credit balance" in str(e).lower() and loop.time() - warned > 3 * 3600:
+                        warned = loop.time()
+                        await s.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
+                            "chat_id": chat, "text": "⚠️ Закончился баланс API Anthropic — заказы не разбираю и черновики "
+                                                     "не пишу. Пополни баланс: console.anthropic.com → Plans & Billing. "
+                                                     "Пропущенные за это время свежие заказы разберу после пополнения."})
             await asyncio.sleep(20)
 
 
