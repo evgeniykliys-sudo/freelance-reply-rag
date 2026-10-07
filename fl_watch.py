@@ -89,6 +89,27 @@ async def fetch_all(session: aiohttp.ClientSession) -> list[Order]:
     return sorted(orders.values(), key=lambda o: o.published)
 
 
+async def fetch_full_desc(session: aiohttp.ClientSession, o: Order) -> str:
+    """RSS отдаёт только начало описания — полное берём со страницы заказа (JSON внутри HTML, вход не нужен).
+    Без этого черновик отвечал на половину задачи: вторая часть ТЗ (объёмы, сопровождение) терялась."""
+    try:
+        async with session.get(o.link) as r:
+            if r.status != 200:
+                return o.desc
+            page = await r.text()
+    except (aiohttp.ClientError, TimeoutError):
+        return o.desc
+    best = o.desc
+    for m in re.finditer(r'"description":"((?:[^"\\]|\\.)*)"', page):
+        try:
+            text = json.loads('"' + m.group(1) + '"').strip()
+        except json.JSONDecodeError:
+            continue
+        if len(text) > len(best):
+            best = text
+    return best
+
+
 # ---------- хранилище: что уже видели ----------
 def db() -> sqlite3.Connection:
     c = sqlite3.connect(DB)
@@ -111,7 +132,8 @@ def order_from_json(t: str) -> Order:
 
 def save_draft(c, o: Order, tri: dict, d: dict, msg_id: int | None):
     c.execute("""insert into drafts(order_id, order_json, tri_json, draft_json) values (?,?,?,?)
-                 on conflict(order_id) do update set draft_json=excluded.draft_json, versions=versions+1, status='new'""",
+                 on conflict(order_id) do update set draft_json=excluded.draft_json, order_json=excluded.order_json,
+                 tri_json=excluded.tri_json, versions=versions+1, status='new'""",
               (o.id, order_to_json(o), json.dumps(tri, ensure_ascii=False), json.dumps(d, ensure_ascii=False)))
     if msg_id:
         c.execute("insert or replace into msgs values (?,?)", (msg_id, o.id))
@@ -153,7 +175,7 @@ big=true — проект явно крупный для одного челов
 
 def triage(client: Anthropic, o: Order) -> dict:
     r = client.messages.create(model=TRIAGE_MODEL, max_tokens=200, system=TRIAGE, messages=[{"role": "user", "content":
-        f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\nЗаголовок: {o.title}\nОписание: {o.desc[:1500]}"}])
+        f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\nЗаголовок: {o.title}\nОписание: {o.desc[:4000]}"}])
     text = "".join(b.text for b in r.content if b.type == "text")
     m = re.search(r"\{.*\}", text, re.S)
     try:
@@ -178,7 +200,12 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
 2. Цена: на {DISCOUNT}% ниже рыночной для такой задачи (или ниже цены из базы, если услуга там есть), не ниже {MIN_PRICE} ₽.
    Если у заказа указан бюджет — предложи бюджет или немного ниже. Округляй до сотен.
    Одной фразой объясни: «беру по сниженной цене — набираю первые отзывы на FL.ru».
-3. Срок реалистичный, с запасом.
+3. Срок реалистичный, с запасом. СРОК — одно целое число дней (не диапазон, не «2 недели»).
+3а. Прочитай ТЗ до конца. Если заказчик прямо спрашивает (цена, срок, сопровождение в месяц, гарантия, этапы) —
+   ответь на КАЖДЫЙ вопрос явно и конкретной цифрой. Сопровождение — фиксированная сумма в месяц и что в неё входит
+   (например: исправление ошибок, мелкие доработки до N часов в месяц, мониторинг работы). Никаких «обсудим по факту»,
+   «по часам, договоримся». Коротко покажи, что учёл ключевые требования ТЗ (объёмы, ограничения, особые пожелания).
+   Для большого ТЗ можно до 9 предложений.
 4. Без контактов, мессенджеров, предоплаты вне FL.ru и БЕЗ ССЫЛОК (никаких github, сайтов, URL) — FL.ru их не любит.
    Примеры работ прикрепляются к отклику отдельно (строка РАБОТЫ), в тексте можно написать «прикрепил похожие работы».
 5. Стиль: живо и по делу, без канцелярита. 4–7 предложений: приветствие по сути задачи → подтверждение (проект или
@@ -203,12 +230,12 @@ def draft(o: Order) -> dict:
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
     messages = [{"role": "user", "content": f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\nТекст заказа:\n{posting}"}]
     for attempt in range(2):
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=1200, system=DRAFT_SYSTEM, messages=messages)
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=DRAFT_SYSTEM, messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
         reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
         price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
         days = re.search(r"СРОК:\s*(\d+)", text)
-        if reply and reply.group(1).strip() and price:
+        if reply and reply.group(1).strip() and price and days:
             break
         # модель ушла от формата (рассуждения, пустой ответ) — просим переписать строго по формату
         messages = messages + [{"role": "assistant", "content": text or "…"},
@@ -255,7 +282,7 @@ def revise(o: Order, d: dict, wish: str) -> dict:
             {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
                                         "(цена, срок, работы, факты), оставь ровно как было. Формат тот же: "
                                         "ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
-    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=1200, system=DRAFT_SYSTEM, messages=msgs)
+    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=DRAFT_SYSTEM, messages=msgs)
     text = "".join(b.text for b in r.content if b.type == "text")
     new = parse_draft(text)
     # если модель потеряла цену/срок/работы — оставляем прежние
@@ -327,6 +354,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if (fresh_db and age_h > first_run_hours) or age_h > MAX_AGE_HOURS:   # старые не шлём, только запоминаем
             mark(c, o.id, "old")
             continue
+        o.desc = await fetch_full_desc(session, o)
         tri = await asyncio.to_thread(triage, client, o)
         if not tri.get("take"):
             mark(c, o.id, "skip: " + str(tri.get("reason", ""))[:200]); done.append((o, tri, None))
