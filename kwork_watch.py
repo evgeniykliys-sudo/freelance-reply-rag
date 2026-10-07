@@ -7,6 +7,7 @@ RSS у Kwork нет, но страница биржи открывается б�
 import html
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -25,8 +26,13 @@ SKIP_CATEGORIES = {"25"}
 SKIP_TITLE = re.compile(r"логотип|лого\b|логобук|вектор|svg|брендбук|айдентик|фирменн\w* стил|\blogo", re.I)
 
 
+# дешёвые заказы не берём: смотрим на желаемый бюджет заказчика (решение Евгения — от 2 500 ₽)
+MIN_BUDGET = int(os.getenv("KWORK_MIN_BUDGET") or 2500)
+
+
 def skipped(w: dict) -> bool:
-    return str(w.get("category_id")) in SKIP_CATEGORIES or bool(SKIP_TITLE.search(html.unescape(w.get("name") or "")))
+    return (str(w.get("category_id")) in SKIP_CATEGORIES or bool(SKIP_TITLE.search(html.unescape(w.get("name") or "")))
+            or float(w.get("priceLimit") or 0) < MIN_BUDGET)
 
 
 def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
