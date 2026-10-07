@@ -26,6 +26,7 @@ from pathlib import Path
 import aiohttp
 from anthropic import Anthropic
 
+import fl_submit
 import rag
 
 log = logging.getLogger("fl_watch")
@@ -176,14 +177,22 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
    Если у заказа указан бюджет — предложи бюджет или немного ниже. Округляй до сотен.
    Одной фразой объясни: «беру по сниженной цене — набираю первые отзывы на FL.ru».
 3. Срок реалистичный, с запасом.
-4. Без контактов, мессенджеров, предоплаты вне FL.ru. Ссылки на GitHub-примеры из фрагментов можно.
+4. Без контактов, мессенджеров, предоплаты вне FL.ru и БЕЗ ССЫЛОК (никаких github, сайтов, URL) — FL.ru их не любит.
+   Примеры работ прикрепляются к отклику отдельно (строка РАБОТЫ), в тексте можно написать «прикрепил похожие работы».
 5. Стиль: живо и по делу, без канцелярита. 4–7 предложений: приветствие по сути задачи → подтверждение (проект или
    план работы) → срок и цена → один уточняющий вопрос, самый важный для оценки.
-6. Ответ строго в формате (без markdown):
+6. РАБОТЫ: номера до 3 работ портфолио из списка ниже, которые реально похожи на заказ или показывают нужный навык
+   (сайт/дизайн → ближе всего AI-консультант на сайт и Mini App; боты → боты; парсинг → парсеры). Если ничего не
+   подходит — «РАБОТЫ: нет».
+7. Ответ строго в формате (без markdown):
 ОТКЛИК:
 <текст>
 ЦЕНА: <число> ₽
-СРОК: <число> дн."""
+СРОК: <число> дн.
+РАБОТЫ: <номера через запятую или нет>
+
+Портфолио:
+""" + fl_submit.portfolio_menu()
 
 
 def draft(o: Order) -> dict:
@@ -202,13 +211,11 @@ def draft(o: Order) -> dict:
         # модель ушла от формата (рассуждения, пустой ответ) — просим переписать строго по формату
         messages = messages + [{"role": "assistant", "content": text or "…"},
                                {"role": "user", "content": "Перепиши строго в формате: ОТКЛИК: … / ЦЕНА: … ₽ / СРОК: … дн. Без вступлений."}]
-    return {"reply": (reply.group(1) if reply else text).strip(),
-            "price": int(price.group(1).replace(" ", "")) if price else None,
-            "days": int(days.group(1)) if days else None}
+    return parse_draft(text)
 
 
 BANNED = [r"\bделал[аи]?\b", r"не первый раз", r"уже (настраивал|делал|работал)", r"\bЕвгений\b", r"опыта (нет|пока нет)",
-          r"@\w{4,}", r"\+?\d[\d\s()-]{9,}\d", r"t\.me/", r"предоплат"]
+          r"@\w{4,}", r"\+?\d[\d\s()-]{9,}\d", r"t\.me/", r"предоплат", r"github", r"https?://", r"www\."]
 
 
 def draft_problems(d: dict) -> list[str]:
@@ -225,25 +232,35 @@ def parse_draft(text: str) -> dict:
     reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
     price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
     days = re.search(r"СРОК:\s*(\d+)", text)
+    works = re.search(r"РАБОТЫ:\s*([^\n]*)", text)
+    nums = [int(x) for x in re.findall(r"\d+", works.group(1))] if works else []
     return {"reply": (reply.group(1) if reply else text).strip(),
             "price": int(price.group(1).replace(" ", "")) if price else None,
-            "days": int(days.group(1)) if days else None}
+            "days": int(days.group(1)) if days else None,
+            "works": fl_submit.works_from_numbers(nums)}
 
 
 def revise(o: Order, d: dict, wish: str) -> dict:
     """Переписать черновик по пожеланию Евгения. Правила те же (без выдуманного опыта и контактов);
     если в пожелании новая цена/срок — берём их."""
     posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
-    prev = f"ОТКЛИК:\n{d['reply']}\nЦЕНА: {d.get('price') or ''} ₽\nСРОК: {d.get('days') or ''} дн."
+    ids = {w["id"]: i for i, w in enumerate(fl_submit.PORTFOLIO, 1)}
+    works = ", ".join(str(ids[w]) for w in d.get("works", []) if w in ids) or "нет"
+    prev = (f"ОТКЛИК:\n{d['reply']}\nЦЕНА: {d.get('price') or ''} ₽\nСРОК: {d.get('days') or ''} дн.\n"
+            f"РАБОТЫ: {works}")
     msgs = [{"role": "user", "content": f"Текст заказа:\n{posting}"},
             {"role": "assistant", "content": prev},
-            {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё остальное оставь как было, "
-                                        "если пожелание этого не касается. Формат тот же: ОТКЛИК / ЦЕНА / СРОК."}]
+            {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
+                                        "(цена, срок, работы, факты), оставь ровно как было. Формат тот же: "
+                                        "ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
     r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=1200, system=DRAFT_SYSTEM, messages=msgs)
-    new = parse_draft("".join(b.text for b in r.content if b.type == "text"))
-    # если модель потеряла цену/срок — оставляем прежние
+    text = "".join(b.text for b in r.content if b.type == "text")
+    new = parse_draft(text)
+    # если модель потеряла цену/срок/работы — оставляем прежние
     new["price"] = new["price"] or d.get("price")
     new["days"] = new["days"] or d.get("days")
+    if "РАБОТЫ:" not in text:
+        new["works"] = d.get("works", [])
     return new
 
 
@@ -260,6 +277,9 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
         lines.append(f"🏷 предлагаю: <b>{d['price']:,} ₽</b>".replace(",", " ") + (f" · {d['days']} дн." if d.get("days") else ""))
     if tri.get("learn"):
         lines.append(f"🎓 освоить: {e(tri['learn'])}")
+    titles = {w["id"]: w["title"] for w in fl_submit.PORTFOLIO}
+    if d.get("works"):
+        lines.append("📎 прикреплю: " + e("; ".join(titles.get(w, str(w)) for w in d["works"])))
     if tri.get("big"):
         lines.append("⚠️ крупный проект — оцени, потянешь ли")
     if probs := draft_problems(d):

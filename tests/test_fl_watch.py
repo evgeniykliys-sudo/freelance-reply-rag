@@ -84,7 +84,7 @@ check("callback_data укладывается в лимит Telegram (64 бай�
       all(len(b.get("callback_data", "").encode()) <= 64 for row in k["inline_keyboard"] for b in row))
 check("карточка версии 2 помечена", "версия 2" in fw.card(o, {}, good, 2))
 check("parse_draft разбирает ответ модели",
-      fw.parse_draft("ОТКЛИК:\nТекст отклика\nЦЕНА: 3 500 ₽\nСРОК: 4 дн.") == {"reply": "Текст отклика", "price": 3500, "days": 4})
+      fw.parse_draft("ОТКЛИК:\nТекст отклика\nЦЕНА: 3 500 ₽\nСРОК: 4 дн.") == {"reply": "Текст отклика", "price": 3500, "days": 4, "works": []})
 
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")
 sys.exit(0 if ok else 1)
