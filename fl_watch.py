@@ -26,6 +26,7 @@ from pathlib import Path
 import aiohttp
 from anthropic import Anthropic
 
+import attachments
 import fl_submit
 import rag
 
@@ -56,6 +57,8 @@ class Order:
     source: str = "fl"                  # fl | kwork
     competitors: int | None = None      # Kwork: сколько предложений уже подано
     max_budget: int | None = None       # Kwork: до какой суммы заказчик готов поднять цену
+    files: list | None = None           # вложения [{name, url}] (у Kwork — из списка, у FL.ru — со страницы)
+    att: dict | None = None             # что вышло со скачиванием: {"read": [...], "skipped": [...], "error": ...}
 
     @property
     def platform(self) -> str:
@@ -213,6 +216,10 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
    (например: исправление ошибок, мелкие доработки до N часов в месяц, мониторинг работы). Никаких «обсудим по факту»,
    «по часам, договоримся». Коротко покажи, что учёл ключевые требования ТЗ (объёмы, ограничения, особые пожелания).
    Для большого ТЗ можно до 9 предложений.
+3б. Если к заказу приложены файлы (ТЗ, таблицы, скриншоты, макеты) — это главный источник. Объём работ, этапы,
+   СРОК и ЦЕНУ считай по ним, а не только по короткому тексту заказа: перечисли про себя все пункты ТЗ и оцени каждый.
+   В отклике упомяни 1–2 конкретные детали из файлов — чтобы было видно, что ТЗ прочитано. Если в ТЗ есть вопросы
+   к исполнителю — ответь на каждый. Если ТЗ на большой проект — предложи этапы с ценой и сроком каждого.
 4. Без контактов, мессенджеров, предоплаты вне FL.ru и БЕЗ ССЫЛОК (никаких github, сайтов, URL) — FL.ru их не любит.
    Примеры работ прикрепляются к отклику отдельно (строка РАБОТЫ), в тексте можно написать «прикрепил похожие работы».
 5. Стиль: живо и по делу, без канцелярита. 4–7 предложений: приветствие по сути задачи → подтверждение (проект или
@@ -241,11 +248,21 @@ def draft_system(o: Order) -> str:
     return DRAFT_SYSTEM.replace("FL.ru", "Kwork") + extra
 
 
+def posting_blocks(o: Order, intro: str) -> list[dict]:
+    """Текст заказа + скачанные вложения (ТЗ, таблицы, картинки) одним сообщением для модели."""
+    posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
+    blocks, _, _ = attachments.to_blocks(attachments.cached(o.id))
+    head = intro + f"Текст заказа:\n{posting}"
+    if blocks:
+        head += "\n\nК заказу приложены файлы — они ниже. Это часть ТЗ, учти их в отклике, цене и сроке."
+    return [{"type": "text", "text": head}] + blocks
+
+
 def draft(o: Order) -> dict:
     posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
     chunks = rag.search(posting)[:6]
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
-    messages = [{"role": "user", "content": f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\nТекст заказа:\n{posting}"}]
+    messages = [{"role": "user", "content": posting_blocks(o, f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\n")}]
     for attempt in range(2):
         r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
@@ -261,6 +278,7 @@ def draft(o: Order) -> dict:
 
 
 BANNED = [r"\bделал[аи]?\b", r"не первый раз", r"уже (настраивал|делал|работал)", r"\bЕвгений\b", r"опыта (нет|пока нет)",
+          r"опыт\w*[^.!?]{0,40}(не было|нет|не делал)",
           r"@\w{4,}", r"\+?\d[\d\s()-]{9,}\d", r"t\.me/", r"предоплат", r"github", r"https?://", r"www\."]
 
 
@@ -271,6 +289,8 @@ def draft_problems(d: dict) -> list[str]:
         probs.append("нет цены")
     if len(d["reply"]) < 150:
         probs.append("короткий черновик")
+    if len(d["reply"]) > 2000:
+        probs.append(f"длиннее 2000 символов ({len(d['reply'])}) — Kwork обрежет")
     return probs
 
 
@@ -289,12 +309,11 @@ def parse_draft(text: str) -> dict:
 def revise(o: Order, d: dict, wish: str) -> dict:
     """Переписать черновик по пожеланию Евгения. Правила те же (без выдуманного опыта и контактов);
     если в пожелании новая цена/срок — берём их."""
-    posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
     ids = {w["id"]: i for i, w in enumerate(fl_submit.PORTFOLIO, 1)}
     works = ", ".join(str(ids[w]) for w in d.get("works", []) if w in ids) or "нет"
     prev = (f"ОТКЛИК:\n{d['reply']}\nЦЕНА: {d.get('price') or ''} ₽\nСРОК: {d.get('days') or ''} дн.\n"
             f"РАБОТЫ: {works}")
-    msgs = [{"role": "user", "content": f"Текст заказа:\n{posting}"},
+    msgs = [{"role": "user", "content": posting_blocks(o, "")},
             {"role": "assistant", "content": prev},
             {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
                                         "(цена, срок, работы, факты), оставь ровно как было. Формат тот же: "
@@ -328,6 +347,11 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
              "", f"<i>{e(o.desc[:400])}{'…' if len(o.desc) > 400 else ''}</i>", ""]
     if d.get("price"):
         lines.append(f"🏷 предлагаю: <b>{d['price']:,} ₽</b>".replace(",", " ") + (f" · {d['days']} дн." if d.get("days") else ""))
+    att = o.att or {}
+    if att.get("read"):
+        lines.append("📄 ТЗ прочитано: " + e(", ".join(att["read"])))
+    if att.get("skipped") or att.get("error"):
+        lines.append("⚠️ вложения: " + e("; ".join(att.get("skipped", []) + ([att["error"]] if att.get("error") else []))))
     if tri.get("learn"):
         lines.append(f"🎓 освоить: {e(tri['learn'])}")
     titles = {w["id"]: w["title"] for w in fl_submit.PORTFOLIO}
@@ -388,6 +412,11 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if not tri.get("take"):
             mark(c, o.id, "skip: " + str(tri.get("reason", ""))[:200]); done.append((o, tri, None))
             continue
+        if o.source == "fl" or o.files:
+            got = await attachments.download(o)
+            _, read, skipped = attachments.to_blocks(attachments.cached(o.id))
+            if got["files"] or got["error"] or skipped:
+                o.att = {"read": read, "skipped": skipped, "error": got["error"]}
         d = await asyncio.to_thread(draft, o)
         msg_id = None
         if not dry:
