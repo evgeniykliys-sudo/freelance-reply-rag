@@ -232,12 +232,29 @@ async def handle_text(message: Message):
     await message.answer(text)
 
 
+async def stop_at_night():
+    """В конце рабочего дня останавливаемся сами; утром бота запустит Планировщик Windows (start_bot.bat)."""
+    await asyncio.sleep(fl_watch.seconds_until_end())
+    logging.info("рабочий день окончен (%s) — останавливаюсь до утра", fl_watch.WORK_HOURS)
+    await dp.stop_polling()
+
+
 async def main():
+    lock = fl_watch.single_instance()
+    if lock is None:
+        logging.info("бот уже запущен — второй экземпляр не нужен")
+        return
+    if not fl_watch.in_work_hours():
+        logging.info("сейчас нерабочее время (%s, Новосибирск) — запустит Планировщик утром", fl_watch.WORK_HOURS)
+        return
     watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
+    night = asyncio.create_task(stop_at_night())
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
+        night.cancel()
+        lock.close()
 
 
 if __name__ == "__main__":

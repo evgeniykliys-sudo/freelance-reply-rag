@@ -165,6 +165,15 @@ check("Kwork: в рубрике без портфолио — предупреж
       "нет портфолио в рубрике «Верстка»" in fw.card(lay, {}, good)
       and "нет портфолио" not in fw.card(k0, {}, good)
       and "нет портфолио" not in fw.card(dataclasses.replace(k0, category="Kwork / Разработка и IT / Скрипты, боты и mini apps"), {}, good))
+from datetime import datetime as _dt, timezone  # noqa: E402
+
+nsk = lambda h, m=0: _dt(2026, 10, 7, h, m, tzinfo=fw.NSK)  # noqa: E731
+check("рабочие часы 8–22 по Новосибирску", [fw.in_work_hours(nsk(h)) for h in (7, 8, 21, 22, 23)] == [False, True, True, False, False])
+check("до конца дня из 21:30 — полчаса", fw.seconds_until_end(nsk(21, 30)) == 1800)
+check("время с другим поясом переводится в Новосибирск", fw.in_work_hours(_dt(2026, 10, 7, 1, 0, tzinfo=timezone.utc)))  # 08:00 НСК
+lk = fw.single_instance(47299)
+check("второй экземпляр бота не запускается", lk is not None and fw.single_instance(47299) is None)
+lk.close()
 check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
 check("Kwork: вложения из JSON попадают в заказ",
       kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
