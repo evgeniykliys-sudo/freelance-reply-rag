@@ -144,6 +144,8 @@ check("Excel: общие строки и числа", "Позиция | Кол-�
 bl, rd, sk = at.to_blocks(sorted(tmp.iterdir()))
 check("в блоки попали Word и Excel, rar пропущен с причиной",
       sorted(rd) == ["ТЗ.docx", "смета.xlsx"] and sk == ["архив.rar (формат .rar не читаю)"] and all(b["type"] == "text" for b in bl))
+check("Kwork: заказ дешевле 2 500 ₽ отсеян, ровно 2 500 — остаётся",
+      [kw.skipped({"name": "Бот", "category_id": "41", "priceLimit": p}) for p in ("2000.00", "2500.00")] == [True, False])
 check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
 check("Kwork: вложения из JSON попадают в заказ",
       kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
