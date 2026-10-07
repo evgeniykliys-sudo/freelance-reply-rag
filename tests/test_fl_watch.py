@@ -86,5 +86,26 @@ check("карточка версии 2 помечена", "версия 2" in fw
 check("parse_draft разбирает ответ модели",
       fw.parse_draft("ОТКЛИК:\nТекст отклика\nЦЕНА: 3 500 ₽\nСРОК: 4 дн.") == {"reply": "Текст отклика", "price": 3500, "days": 4, "works": []})
 
+# Kwork: заказы из JSON страницы биржи
+import kwork_watch as kw  # noqa: E402
+
+KW = ('<script>var x = {"wants":[{"id":3264640,"name":"Сайт &laquo;под ключ&raquo;","description":"Нужен сайт.\\r\\nWordPress",'
+      '"priceLimit":"80000.00","possiblePriceLimit":200000,"kwork_count":9,"category_id":"37",'
+      '"date_create":"2026-10-07 12:36:34","date_active":"2026-10-07 12:37:46"}],'
+      '"categories":{"11":{"name":"Разработка и IT","cats":[{"CATID":"37","name":"Создание сайта"}]}}};</script>')
+kwo = kw.parse_page(KW, kw.category_names(KW))
+check("Kwork: заказ разобран", len(kwo) == 1)
+k0 = kwo[0]
+check("Kwork: id с префиксом kw, ссылка на /view", k0.id == "kw3264640" and k0.link.endswith("/projects/3264640/view"))
+check("Kwork: бюджет, «готов до», конкуренты", (k0.budget, k0.max_budget, k0.competitors) == (80000, 200000, 9))
+check("Kwork: время МСК → UTC", k0.published.hour == 9 and k0.published.minute == 37)
+check("Kwork: HTML-сущности и переносы", k0.title == "Сайт «под ключ»" and k0.desc == "Нужен сайт.\nWordPress")
+check("Kwork: раздел с названием", k0.category == "Kwork / Разработка и IT / Создание сайта")
+cardk = fw.card(k0, {}, good)
+check("Kwork: карточка с площадкой, «готов до», откликами", all(x in cardk for x in ["[Kwork]", "готов до 200 000 ₽", "откликов: 9"]))
+check("Kwork: кнопка «Открыть заказ на Kwork»", fw.keyboard(k0.id, k0.link)["inline_keyboard"][1][0]["text"] == "Открыть заказ на Kwork")
+check("Kwork: в промпте площадка Kwork, не FL.ru", "Kwork" in fw.draft_system(k0) and "отзывы на FL.ru" not in fw.draft_system(k0))
+check("старый заказ без новых полей читается из базы", fw.order_from_json(fw.order_to_json(by["5524601"])).source == "fl")
+
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")
 sys.exit(0 if ok else 1)
