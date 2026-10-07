@@ -39,6 +39,8 @@ CATEGORIES = {2: "Сайты", 3: "Дизайн", 5: "Программирова
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-4-5-20251001"
 DISCOUNT = int(os.getenv("DISCOUNT_PCT") or 40)        # насколько ниже рынка/прайса предлагать на старте
 MIN_PRICE = int(os.getenv("MIN_PRICE") or 1500)
+# заказы старше этого возраста не берём: на них уже набралось откликов (решение Евгения — 2 часа)
+MAX_AGE_HOURS = float(os.getenv("MAX_AGE_HOURS") or 2)
 
 
 @dataclass
@@ -322,7 +324,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if is_seen(c, o.id):
             continue
         age_h = (datetime.now(timezone.utc) - o.published).total_seconds() / 3600
-        if fresh_db and age_h > first_run_hours:      # первый запуск: старые заказы не шлём, только запоминаем
+        if (fresh_db and age_h > first_run_hours) or age_h > MAX_AGE_HOURS:   # старые не шлём, только запоминаем
             mark(c, o.id, "old")
             continue
         tri = await asyncio.to_thread(triage, client, o)
