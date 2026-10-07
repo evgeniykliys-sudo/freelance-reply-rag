@@ -104,7 +104,7 @@ def draft_reply(posting: str) -> tuple[str, list[dict]]:
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in relevant)
     response = _get_claude().messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=700,
+        max_tokens=3000,
         system=SYSTEM_PROMPT,
         messages=[
             {
