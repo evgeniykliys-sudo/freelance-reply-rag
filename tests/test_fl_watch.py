@@ -120,6 +120,34 @@ check("Kwork цена подгоняется под рамки заказа",
       (ks.fit_price(1500, {"min": 2000, "max": 30000}), ks.fit_price(50000, {"min": 2000, "max": 30000}),
        ks.fit_price(8500, {"min": 2000, "max": None})) == (2000, 30000, 8500))
 check("Kwork: номер проекта из ссылки", ks.project_id("https://kwork.ru/projects/3264720/view") == "3264720")
+check("ловит «прямого опыта с VK API пока не было»",
+      fw.draft_problems({**good, "reply": good["reply"] + " Прямого опыта с VK API пока не было."}))
+
+# вложения: Word и Excel → текст без сторонних библиотек
+import zipfile  # noqa: E402
+
+import attachments as at  # noqa: E402
+
+tmp = Path(tempfile.mkdtemp())
+with zipfile.ZipFile(tmp / "ТЗ.docx", "w") as z:
+    z.writestr("word/document.xml", '<w:document><w:body><w:p><w:r><w:t>Бот для записи</w:t></w:r></w:p>'
+               '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Услуг</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>15</w:t></w:r></w:p>'
+               '</w:tc></w:tr></w:tbl><w:p><w:r><w:t xml:space="preserve">Срок &amp; цена</w:t></w:r></w:p></w:body></w:document>')
+with zipfile.ZipFile(tmp / "смета.xlsx", "w") as z:
+    z.writestr("xl/sharedStrings.xml", "<sst><si><t>Позиция</t></si><si><t>Кол-во</t></si></sst>")
+    z.writestr("xl/worksheets/sheet1.xml", '<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row>'
+               '<row><c t="inlineStr"><is><t>Кнопка</t></is></c><c><v>3</v></c></row></sheetData></worksheet>')
+(tmp / "архив.rar").write_bytes(b"Rar!")
+dt = at.docx_text(tmp / "ТЗ.docx")
+check("Word: абзацы, таблица и сущности", all(x in dt for x in ["Бот для записи", "Услуг", "15", "Срок & цена"]))
+check("Excel: общие строки и числа", "Позиция | Кол-во" in at.xlsx_text(tmp / "смета.xlsx") and "Кнопка | 3" in at.xlsx_text(tmp / "смета.xlsx"))
+bl, rd, sk = at.to_blocks(sorted(tmp.iterdir()))
+check("в блоки попали Word и Excel, rar пропущен с причиной",
+      sorted(rd) == ["ТЗ.docx", "смета.xlsx"] and sk == ["архив.rar (формат .rar не читаю)"] and all(b["type"] == "text" for b in bl))
+check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
+check("Kwork: вложения из JSON попадают в заказ",
+      kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
+                    {})[0].files == [{"name": "ТЗ.docx", "url": "https://kwork.ru/files/x/ТЗ.docx"}])
 check("старый заказ без новых полей читается из базы", fw.order_from_json(fw.order_to_json(by["5524601"])).source == "fl")
 
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")

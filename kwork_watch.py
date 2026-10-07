@@ -55,7 +55,9 @@ def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
                          link=f"https://kwork.ru/projects/{w['id']}/view", desc=desc,
                          category="Kwork / " + cat_names.get(str(w.get("category_id")), str(w.get("category_id"))),
                          budget=budget, for_all=True, published=published.astimezone(timezone.utc), source="kwork",
-                         competitors=int(w.get("kwork_count") or 0), max_budget=max_budget))
+                         competitors=int(w.get("kwork_count") or 0), max_budget=max_budget,
+                         files=[{"name": f.get("fname") or "", "url": f["url"]}
+                                for f in (w.get("files") or []) if f.get("url")] or None))
     return out
 
 
