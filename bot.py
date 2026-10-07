@@ -78,6 +78,16 @@ async def on_approve(cb: CallbackQuery):
     if not d.get("price") or not d.get("days"):
         await cb.answer("В черновике нет цены или срока — поправь через «Править»", show_alert=True)
         return
+    if o.source == "kwork":
+        # автоотправка на Kwork — после входа в Kwork в том же Chrome; пока — текст для копирования
+        c.execute("update drafts set status='approved' where order_id=?", (order_id,))
+        c.commit()
+        await cb.answer("Утверждено")
+        await cb.message.answer(fl_watch.card(o, tri, d, ver, "approved"), parse_mode="HTML",
+                                disable_web_page_preview=True, reply_markup=kb(order_id, o.link, "approved"))
+        await cb.message.answer(f"Скопируй текст и вставь в предложение на Kwork (кнопка «Открыть заказ»): "
+                                f"цена {d['price']} ₽, срок {d['days']} дн.")
+        return
     await cb.answer("Заполняю форму отклика…")
     wait = await cb.message.answer("⏳ Открываю заказ в Chrome и заполняю форму (не отправляю)…")
     try:

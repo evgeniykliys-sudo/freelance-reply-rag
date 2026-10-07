@@ -53,6 +53,13 @@ class Order:
     budget: int | None
     for_all: bool
     published: datetime
+    source: str = "fl"                  # fl | kwork
+    competitors: int | None = None      # Kwork: сколько предложений уже подано
+    max_budget: int | None = None       # Kwork: до какой суммы заказчик готов поднять цену
+
+    @property
+    def platform(self) -> str:
+        return "Kwork" if self.source == "kwork" else "FL.ru"
 
 
 def parse_feed(xml_text: str) -> list[Order]:
@@ -224,13 +231,23 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
 """ + fl_submit.portfolio_menu()
 
 
+def draft_system(o: Order) -> str:
+    """Тот же промпт, но с правильной площадкой («набираю отзывы на Kwork», правила Kwork)."""
+    if o.source != "kwork":
+        return DRAFT_SYSTEM
+    extra = ("\n\nKwork: это предложение на бирже проектов Kwork. Заказчик видит десятки предложений за минуты — "
+             "первая фраза должна сразу попасть в суть его задачи. Если указано «готов до N ₽», бюджет можно "
+             "поднимать, но в режиме набора отзывов держись ближе к нижней границе.")
+    return DRAFT_SYSTEM.replace("FL.ru", "Kwork") + extra
+
+
 def draft(o: Order) -> dict:
     posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
     chunks = rag.search(posting)[:6]
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
     messages = [{"role": "user", "content": f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\nТекст заказа:\n{posting}"}]
     for attempt in range(2):
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=DRAFT_SYSTEM, messages=messages)
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
         reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
         price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
@@ -282,7 +299,7 @@ def revise(o: Order, d: dict, wish: str) -> dict:
             {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
                                         "(цена, срок, работы, факты), оставь ровно как было. Формат тот же: "
                                         "ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
-    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=DRAFT_SYSTEM, messages=msgs)
+    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
     text = "".join(b.text for b in r.content if b.type == "text")
     new = parse_draft(text)
     # если модель потеряла цену/срок/работы — оставляем прежние
@@ -297,10 +314,17 @@ def revise(o: Order, d: dict, wish: str) -> dict:
 def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") -> str:
     e = html.escape
     age = int((datetime.now(timezone.utc) - o.published).total_seconds() // 60)
-    lines = [f"🆕 <b>{e(o.title)}</b>",
+    money = lambda v: f"{v:,} ₽".replace(",", " ")  # noqa: E731
+    budget = f"💰 бюджет: {money(o.budget) if o.budget else 'не указан'}"
+    if o.max_budget and o.budget and o.max_budget > o.budget:
+        budget += f" (готов до {money(o.max_budget)})"
+    if o.source == "fl" and o.for_all:
+        budget += " · 🔓 для всех"
+    if o.competitors is not None:
+        budget += f" · 👥 откликов: {o.competitors}"
+    lines = [f"🆕 <b>[{o.platform}] {e(o.title)}</b>",
              f"📂 {e(o.category)} · ⏱ {age} мин назад",
-             f"💰 бюджет: {f'{o.budget:,} ₽'.replace(',', ' ') if o.budget else 'не указан'}"
-             + (" · 🔓 для всех" if o.for_all else ""),
+             budget,
              "", f"<i>{e(o.desc[:400])}{'…' if len(o.desc) > 400 else ''}</i>", ""]
     if d.get("price"):
         lines.append(f"🏷 предлагаю: <b>{d['price']:,} ₽</b>".replace(",", " ") + (f" · {d['days']} дн." if d.get("days") else ""))
@@ -323,7 +347,7 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
 
 
 def keyboard(order_id: str, url: str, status: str = "new") -> dict:
-    rows = [[{"text": "Открыть заказ на FL.ru", "url": url}]]
+    rows = [[{"text": "Открыть заказ на " + ("Kwork" if "kwork.ru" in url else "FL.ru"), "url": url}]]
     if status != "approved":
         rows.insert(0, [{"text": "✏️ Править", "callback_data": f"edit:{order_id}"},
                         {"text": "✅ Утвердить", "callback_data": f"ok:{order_id}"}])
@@ -342,10 +366,14 @@ async def send(session, token, chat, text, url, order_id) -> int | None:
 
 
 # ---------- цикл ----------
-async def run_once(session, client, token=None, chat=None, dry=False, first_run_hours=3) -> list[tuple[Order, dict, dict | None]]:
+async def run_once(session, client, token=None, chat=None, dry=False, first_run_hours=3,
+                   fetch=None) -> list[tuple[Order, dict, dict | None]]:
     c = db()
-    orders = await fetch_all(session)
-    fresh_db = c.execute("select count(*) from seen").fetchone()[0] == 0
+    orders = await (fetch or fetch_all)(session)
+    src = orders[0].source if orders else "fl"
+    # «первый запуск» — отдельно для каждой площадки: Kwork не должен вывалить сотню старых заказов
+    fresh_db = c.execute("select count(*) from seen where id like ?", ("kw%" if src == "kwork" else "%",)).fetchone()[0] == 0 \
+        if src == "kwork" else c.execute("select count(*) from seen").fetchone()[0] == 0
     done = []
     for o in orders:
         if is_seen(c, o.id):
@@ -354,7 +382,8 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if (fresh_db and age_h > first_run_hours) or age_h > MAX_AGE_HOURS:   # старые не шлём, только запоминаем
             mark(c, o.id, "old")
             continue
-        o.desc = await fetch_full_desc(session, o)
+        if o.source == "fl":
+            o.desc = await fetch_full_desc(session, o)    # у Kwork полное описание уже в списке
         tri = await asyncio.to_thread(triage, client, o)
         if not tri.get("take"):
             mark(c, o.id, "skip: " + str(tri.get("reason", ""))[:200]); done.append((o, tri, None))
@@ -371,16 +400,25 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
 
 
 async def watch_forever(token, chat, every=180):
+    """FL.ru — раз в every секунд, Kwork — раз в KWORK_EVERY_SEC (там на заказ за 10 минут приходят десятки откликов)."""
+    import kwork_watch
     client = Anthropic()
+    sources = [("FL", fetch_all, every), ("Kwork", kwork_watch.fetch_all, int(os.getenv("KWORK_EVERY_SEC") or 120))]
+    last = {name: 0.0 for name, *_ in sources}
+    loop = asyncio.get_running_loop()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40), headers={"User-Agent": UA}) as s:
         while True:
-            try:
-                res = await run_once(s, client, token, chat)
-                if res:
-                    log.info("FL: новых %s, отправлено %s", len(res), sum(1 for _, _, d in res if d))
-            except Exception:
-                log.exception("ошибка прохода FL")
-            await asyncio.sleep(every)
+            for name, fetch, period in sources:
+                if loop.time() - last[name] < period:
+                    continue
+                last[name] = loop.time()
+                try:
+                    res = await run_once(s, client, token, chat, fetch=fetch)
+                    if res:
+                        log.info("%s: новых %s, отправлено %s", name, len(res), sum(1 for _, _, d in res if d))
+                except Exception:
+                    log.exception("ошибка прохода %s", name)
+            await asyncio.sleep(20)
 
 
 async def _cli():
