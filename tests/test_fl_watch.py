@@ -174,6 +174,11 @@ check("время с другим поясом переводится в Нов�
 lk = fw.single_instance(47299)
 check("второй экземпляр бота не запускается", lk is not None and fw.single_instance(47299) is None)
 lk.close()
+t15 = fw.fit_days({"reply": "Сделаю за 7 дней, цена 15 000 ₽.", "price": 15000, "days": 7})
+check("15 000 ₽ · 7 дн. → 2 дня, и в тексте тоже", t15["days"] == 2 and "за 2 дня" in t15["reply"] and "7 дней" not in t15["reply"])
+check("40 000 ₽ · 14 дн. → 7; 30 000 ₽ · 5 дн. не трогаем",
+      fw.fit_days({"reply": "x", "price": 40000, "days": 14})["days"] == 7 and fw.fit_days({"reply": "x", "price": 30000, "days": 5})["days"] == 5)
+check("дороже 40 000 ₽ — срок по объёму, без потолка", fw.fit_days({"reply": "x", "price": 60000, "days": 12})["days"] == 12)
 check("имя файла чистится от запрещённых символов", at.safe_name("ТЗ%20v1/2:итог?.docx") == "ТЗ v1_2_итог_.docx")
 check("Kwork: вложения из JSON попадают в заказ",
       kw.parse_page(KW.replace('"date_active"', '"files":[{"fname":"ТЗ.docx","url":"https://kwork.ru/files/x/ТЗ.docx"}],"date_active"'),
