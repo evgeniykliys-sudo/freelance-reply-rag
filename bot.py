@@ -3,6 +3,7 @@ import logging
 import os
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
@@ -247,6 +248,16 @@ async def main():
     if not fl_watch.in_work_hours():
         logging.info("сейчас нерабочее время (%s, Новосибирск) — запустит Планировщик утром", fl_watch.WORK_HOURS)
         return
+    # в 8:00 / сразу после включения ПК сети или Telegram может ещё не быть — ждём, а не падаем
+    while True:
+        try:
+            await bot.get_me()
+            break
+        except TelegramNetworkError as e:
+            if not fl_watch.in_work_hours():
+                return
+            logging.warning("Telegram пока недоступен (%s) — повтор через 30 с", e)
+            await asyncio.sleep(30)
     watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
     night = asyncio.create_task(stop_at_night())
     try:
