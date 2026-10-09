@@ -4,12 +4,14 @@ Chrome должен быть запущен с портом отладки (star
 заполняем форму на странице заказа, как человек. Каждый отклик платный — отправка только по кнопке в Telegram.
 """
 import json
+import logging
 import os
 import re
 from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+log = logging.getLogger("fl_submit")
 CDP = os.getenv("CHROME_CDP") or "http://localhost:9333"
 SHOTS = Path(__file__).parent / "shots"
 PORTFOLIO = json.loads((Path(__file__).parent / "fl_portfolio.json").read_text(encoding="utf-8"))  # [{id, title}]
@@ -86,10 +88,20 @@ async def prepare(link: str, text: str, price: int, days: int, works: list[int],
             await page.set_viewport_size({"width": 1280, "height": 1400})
             await page.evaluate("y => window.scrollTo(0, y)", max(0, (top or {"y": 0})["y"] - 40))
             await page.wait_for_timeout(500)
+            # координаты — от начала страницы (full_page): длинный отклик растягивает поле выше окна,
+            # и кадр по координатам окна вылезал за край → «Clipped area is … outside the resulting image»
+            sy = await page.evaluate("() => window.scrollY")
             top = await page.locator("#el-descr").bounding_box()
-            slots = await page.locator("#work_block .works").bounding_box() or top
-            await page.screenshot(path=str(shot), clip={"x": max(0, top["x"] - 20), "y": max(0, top["y"] - 80),
-                                                         "width": 760, "height": slots["y"] + slots["height"] - top["y"] + 100})
+            slots = await page.locator("#work_block .works").bounding_box()
+            if not slots or slots["height"] <= 0 or slots["y"] < top["y"]:
+                slots = top                                  # блок работ скрыт — кадр по полю текста
+            height = max(200, slots["y"] + slots["height"] - top["y"] + 180)
+            try:
+                await page.screenshot(path=str(shot), full_page=True, clip={
+                    "x": max(0, top["x"] - 20), "y": max(0, top["y"] + sy - 80), "width": 760, "height": height})
+            except Exception:
+                log.warning("скриншот формы по кадру не вышел — снимаю страницу целиком", exc_info=True)
+                await page.screenshot(path=str(shot), full_page=True)
             return {**st, "shot": str(shot), "works": [int(x) for x in chosen]}
         finally:
             await page.close()          # закрываем только свою вкладку, ваш Chrome остаётся
