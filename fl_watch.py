@@ -40,7 +40,9 @@ CATEGORIES = {2: "Сайты", 3: "Дизайн", 5: "Программирова
               37: "Браузеры", 40: "Интернет-магазины", 41: "Автоматизация бизнеса", 42: "Фирменный стиль"}
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-4-5-20251001"
 DISCOUNT = int(os.getenv("DISCOUNT_PCT") or 40)        # насколько ниже рынка/прайса предлагать на старте
-MIN_PRICE = int(os.getenv("MIN_PRICE") or 1500)
+# минималка Евгения для обеих бирж: заказы с бюджетом ниже — не берём, и сами дешевле не предлагаем
+MIN_BUDGET = int(os.getenv("MIN_BUDGET") or os.getenv("KWORK_MIN_BUDGET") or 2500)
+MIN_PRICE = int(os.getenv("MIN_PRICE") or MIN_BUDGET)
 # заказы старше этого возраста не берём: на них уже набралось откликов (решение Евгения — 2 часа)
 MAX_AGE_HOURS = float(os.getenv("MAX_AGE_HOURS") or 2)
 # рабочие часы бота по Новосибирску (решение Евгения): ночью не следим, не тратим API и не будим уведомлениями
@@ -610,6 +612,9 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         age_h = (datetime.now(timezone.utc) - o.published).total_seconds() / 3600
         if (fresh_db and age_h > first_run_hours) or age_h > MAX_AGE_HOURS:   # старые не шлём, только запоминаем
             mark(c, o.id, "old")
+            continue
+        if o.budget and o.budget < MIN_BUDGET:                 # FL.ru: у Kwork такие отсекаются ещё в kwork_watch
+            mark(c, o.id, f"skip: бюджет {o.budget} < {MIN_BUDGET}"); done.append((o, {"reason": "дешевле минималки"}, None))
             continue
         if o.source == "fl":
             o.desc = await fetch_full_desc(session, o)    # у Kwork полное описание уже в списке
