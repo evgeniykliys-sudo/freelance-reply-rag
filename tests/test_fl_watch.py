@@ -197,6 +197,20 @@ mvp.desc = "Сначала нужен MVP за небольшой бюджет, 
 check("заказчик сам просит MVP — отдельный этап без замечания",
       not any("этап" in p for p in fw.draft_problems({"reply": split * 3, "price": 30000, "days": 6}, mvp)))
 
+import asyncio  # noqa: E402
+
+cheap = dataclasses.replace(by["5524601"], id="cheap1", budget=500, published=_dt.now(timezone.utc))
+c.execute("insert or replace into seen values ('x', 'x', 'old')"); c.commit()       # не «первый запуск»
+
+
+async def _fetch(_):
+    return [cheap]
+
+res = asyncio.run(fw.run_once(None, None, dry=True, fetch=_fetch))      # client=None: до нейросети дойти не должно
+check("FL.ru: бюджет 500 ₽ < минималки 2500 — пропуск без нейросети",
+      res and res[0][2] is None and fw.is_seen(c, "cheap1"))
+check("минимальная цена в отклике не ниже минималки", fw.MIN_PRICE >= fw.MIN_BUDGET == 2500)
+
 ok_reply = "Примеры работ: прикрепил сайт на Tilda — похож структурой и заявками. " * 3
 check("пункт заказчика без ответа — в замечаниях",
       any("Примеры" in p for p in fw.draft_problems({"reply": ok_reply, "price": 9000, "days": 2,
