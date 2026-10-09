@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, FSInputFile, ForceReply, InlineKeyboard
 from dotenv import load_dotenv
 
 import fl_submit
+import inbox_watch
 import kwork_submit
 import fl_watch
 from rag import draft_reply
@@ -29,12 +30,17 @@ HELP_TEXT = (
     "отклика и ценой.\n\n"
     "Под карточкой: «✏️ Править» — напиши пожелание (или просто ответь на карточку), перепишу черновик; "
     "«✅ Утвердить» — зафиксирую итоговый текст.\n\n"
+    "Сообщения от заказчиков Kwork и FL.ru тоже присылаю сюда с черновиком ответа: «🚀 Отправить», «✏️ Править», "
+    "«✍️ Свой текст» (отправлю твой текст как есть) или «Без ответа». Без кнопки заказчику ничего не уходит.\n\n"
     "Можно и вручную: пришли текст любого заказа — предложу черновик отклика по базе услуг."
 )
 
 # бот личный: чужим не отвечает (иначе любой может тратить ваш ключ нейросети)
 dp.message.filter(F.from_user.id == ADMIN_ID)
 dp.callback_query.filter(F.from_user.id == ADMIN_ID)
+inbox_watch.router.message.filter(F.from_user.id == ADMIN_ID)
+inbox_watch.router.callback_query.filter(F.from_user.id == ADMIN_ID)
+dp.include_router(inbox_watch.router)
 
 # заказ, для которого ждём пожелание после кнопки «Править»
 pending_edit: dict[int, str] = {}
@@ -210,6 +216,9 @@ async def revise_and_send(message: Message, order_id: str, wish: str):
 
 @dp.message(F.text)
 async def handle_text(message: Message):
+    # 0) переписка с заказчиком: правка ответа / свой текст / reply на карточку сообщения
+    if await inbox_watch.handle_text(message, bot):
+        return
     c = fl_watch.db()
     # 1) ответ (reply) на карточку заказа — это пожелание к черновику
     if message.reply_to_message:
@@ -259,11 +268,13 @@ async def main():
             logging.warning("Telegram пока недоступен (%s) — повтор через 30 с", e)
             await asyncio.sleep(30)
     watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
+    inbox = asyncio.create_task(inbox_watch.watch_forever(bot, ADMIN_ID))
     night = asyncio.create_task(stop_at_night())
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
+        inbox.cancel()
         night.cancel()
         lock.close()
 
