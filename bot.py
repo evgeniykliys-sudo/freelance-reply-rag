@@ -18,7 +18,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID") or 0)   # кому слать новые заказы FL.ru и кому отвечать
-FL_EVERY = int(os.getenv("FL_EVERY_SEC") or 180)
+FL_EVERY = int(os.getenv("FL_EVERY_SEC") or 60)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()

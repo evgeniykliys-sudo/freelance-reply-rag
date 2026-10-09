@@ -211,6 +211,22 @@ check("FL.ru: бюджет 500 ₽ < минималки 2500 — пропуск 
       res and res[0][2] is None and fw.is_seen(c, "cheap1"))
 check("минимальная цена в отклике не ниже минималки", fw.MIN_PRICE >= fw.MIN_BUDGET == 2500)
 
+import time  # noqa: E402
+
+_tri, _draft = fw.triage, fw.draft
+fw.triage = lambda client, o: {"take": True}
+fw.draft = lambda o: (time.sleep(1), {"reply": "x" * 200, "price": 5000, "days": 1, "works": []})[1]
+pair = [dataclasses.replace(k0, id=f"kwpar{i}", budget=5000, files=[], published=_dt.now(timezone.utc)) for i in (1, 2)]
+
+
+async def _fetch2(_):
+    return pair
+
+t0 = time.time()
+res = asyncio.run(fw.run_once(None, None, dry=True, fetch=_fetch2))
+check("два заказа разбираются параллельно, а не друг за другом", len(res) == 2 and time.time() - t0 < 1.8)
+fw.triage, fw.draft = _tri, _draft
+
 ok_reply = "Примеры работ: прикрепил сайт на Tilda — похож структурой и заявками. " * 3
 check("пункт заказчика без ответа — в замечаниях",
       any("Примеры" in p for p in fw.draft_problems({"reply": ok_reply, "price": 9000, "days": 2,
