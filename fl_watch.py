@@ -605,7 +605,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
     # «первый запуск» — отдельно для каждой площадки: Kwork не должен вывалить сотню старых заказов
     fresh_db = c.execute("select count(*) from seen where id like ?", ("kw%" if src == "kwork" else "%",)).fetchone()[0] == 0 \
         if src == "kwork" else c.execute("select count(*) from seen").fetchone()[0] == 0
-    done = []
+    done, todo = [], []
     for o in orders:
         if is_seen(c, o.id):
             continue
@@ -616,42 +616,64 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if o.budget and o.budget < MIN_BUDGET:                 # FL.ru: у Kwork такие отсекаются ещё в kwork_watch
             mark(c, o.id, f"skip: бюджет {o.budget} < {MIN_BUDGET}"); done.append((o, {"reason": "дешевле минималки"}, None))
             continue
+        todo.append(o)
+
+    async def handle(o: Order):
         if o.source == "fl":
             o.desc = await fetch_full_desc(session, o)    # у Kwork полное описание уже в списке
         tri = await asyncio.to_thread(triage, client, o)
         if not tri.get("take"):
-            mark(c, o.id, "skip: " + str(tri.get("reason", ""))[:200]); done.append((o, tri, None))
-            continue
+            mark(c, o.id, "skip: " + str(tri.get("reason", ""))[:200])
+            return o, tri, None
         if o.source == "fl" or o.files:
             got = await attachments.download(o)
             _, read, skipped = attachments.to_blocks(attachments.cached(o.id))
             if got["files"] or got["error"] or skipped:
                 o.att = {"read": read, "skipped": skipped, "error": got["error"]}
         d = await asyncio.to_thread(draft, o)
-        msg_id = None
         if not dry:
             msg_id = await send(session, token, chat, card(o, tri, d), o.link, o.id)
             if not msg_id:
-                continue                                # не отправилось — попробуем в следующем проходе
+                return None                             # не отправилось — попробуем в следующем проходе
             save_draft(c, o, tri, d, msg_id)
-        mark(c, o.id, "sent"); done.append((o, tri, d))
+        mark(c, o.id, "sent")
+        return o, tri, d
+
+    # несколько новых заказов разом — разбираем параллельно: третий не ждёт, пока напишутся черновики первых двух
+    sem = asyncio.Semaphore(PARALLEL)
+
+    async def guarded(o):
+        async with sem:
+            return await handle(o)
+
+    failed = None
+    for o, res in zip(todo, await asyncio.gather(*(guarded(o) for o in todo), return_exceptions=True)):
+        if isinstance(res, BaseException):
+            log.error("заказ %s: %s", o.id, res, exc_info=res)
+            failed = failed or res
+        elif res:
+            done.append(res)
+    if failed is not None and "credit balance" in str(failed).lower():
+        raise failed                                    # чтобы watch_forever предупредил о балансе
     return done
 
 
-async def watch_forever(token, chat, every=180):
-    """FL.ru — раз в every секунд, Kwork — раз в KWORK_EVERY_SEC (там на заказ за 10 минут приходят десятки откликов)."""
+PARALLEL = int(os.getenv("DRAFT_PARALLEL") or 3)
+
+
+async def watch_forever(token, chat, every=60):
+    """FL.ru — раз в every секунд, Kwork — раз в KWORK_EVERY_SEC. У каждой биржи свой цикл: пока пишутся черновики
+    для FL.ru, Kwork продолжает проверяться (раньше ждал — а там за минуты набегают отклики)."""
     import kwork_watch
     client = Anthropic()
-    sources = [("FL", fetch_all, every), ("Kwork", kwork_watch.fetch_all, int(os.getenv("KWORK_EVERY_SEC") or 120))]
-    last = {name: 0.0 for name, *_ in sources}
+    sources = [("FL", fetch_all, every), ("Kwork", kwork_watch.fetch_all, int(os.getenv("KWORK_EVERY_SEC") or 60))]
     loop = asyncio.get_running_loop()
-    warned = 0.0      # когда последний раз предупреждали о закончившемся балансе API
+    warned = [0.0]    # когда последний раз предупреждали о закончившемся балансе API
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40), headers={"User-Agent": UA}) as s:
-        while True:
-            for name, fetch, period in sources:
-                if loop.time() - last[name] < period:
-                    continue
-                last[name] = loop.time()
+
+        async def poll(name, fetch, period):
+            while True:
+                started = loop.time()
                 try:
                     res = await run_once(s, client, token, chat, fetch=fetch)
                     if res:
@@ -659,13 +681,15 @@ async def watch_forever(token, chat, every=180):
                 except Exception as e:
                     log.exception("ошибка прохода %s", name)
                     # кончились деньги на API — без этого бот молча перестаёт присылать заказы; пишем раз в 3 часа
-                    if "credit balance" in str(e).lower() and loop.time() - warned > 3 * 3600:
-                        warned = loop.time()
+                    if "credit balance" in str(e).lower() and loop.time() - warned[0] > 3 * 3600:
+                        warned[0] = loop.time()
                         await s.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
                             "chat_id": chat, "text": "⚠️ Закончился баланс API Anthropic — заказы не разбираю и черновики "
                                                      "не пишу. Пополни баланс: console.anthropic.com → Plans & Billing. "
                                                      "Пропущенные за это время свежие заказы разберу после пополнения."})
-            await asyncio.sleep(20)
+                await asyncio.sleep(max(5, period - (loop.time() - started)))
+
+        await asyncio.gather(*(poll(*src) for src in sources))
 
 
 async def _cli():

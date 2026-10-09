@@ -23,6 +23,7 @@ from aiogram.types import (CallbackQuery, ForceReply, InlineKeyboardButton, Inli
 from playwright.async_api import async_playwright
 
 import attachments
+import fl_submit
 import fl_watch
 import rag
 from fl_submit import CDP
@@ -209,7 +210,16 @@ SYSTEM = """Ты отвечаешь заказчику в чате {site} от �
    Если для работы чего-то не хватает (доступы, материалы) — попроси одним конкретным списком.
 7. Если отвечать не нужно (заказчик написал «спасибо»/«ок», системное уведомление) — выведи ровно «НЕ НУЖЕН: <почему>».
 8. Чат биржи не понимает разметку: никаких **звёздочек**, #заголовков и markdown. Списки — строками с «—» или «1.».
-Выведи только текст ответа заказчику — без кавычек, пояснений и подписи."""
+9. Просят портфолио/примеры — НИКОГДА не пиши «портфолио нет» или «по этой теме нет». Назови 1–3 самые близкие работы
+   из списка ниже по названию, скажи, чем похожи, и что они в разделе «Портфолио» профиля. Полиграфия, вывески,
+   упаковка, логотипы → айдентика вафельного кафе (логотип, вывеска, упаковка); сайты → сайт «Под Ключ» на Tilda,
+   сайт услуги с калькулятором; боты и автоматизация → боты из списка.
+Выведи только текст ответа заказчику — без кавычек, пояснений и подписи.
+
+Работы в портфолио:
+""" + "\n".join(f"— {w['title']}" for w in fl_submit.PORTFOLIO) + """
+— (на Kwork также) Сайт услуги с калькулятором и заявками в Telegram; База знаний для сотрудников;
+  Адаптивная вёрстка: одна страница — три экрана без горизонтальной прокрутки"""
 
 
 def conversation(item: dict, file_blocks: list[dict]) -> list[dict]:
@@ -235,13 +245,26 @@ def ask(item: dict, content: list[dict], extra: list[dict] | None = None) -> str
 
 def draft(item: dict, file_blocks: list[dict]) -> str:
     try:
-        return ask(item, conversation(item, file_blocks))
+        text = ask(item, conversation(item, file_blocks))
     except Exception as e:
         if not file_blocks or "credit balance" in str(e).lower():
             raise
         log.warning("%s: вложения не приняты моделью, черновик без них", item["key"])
         item["att_error"] = "нейросеть не приняла вложения — черновик без них"
-        return ask(item, conversation(item, []))
+        file_blocks = []
+        text = ask(item, conversation(item, []))
+    if re.search(SELF_DOWN, text, re.I):
+        # «портфолио по этой теме нет» — заказчик после такого уходит (так и было с полиграфией); переписываем
+        text = ask(item, conversation(item, file_blocks), [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": "Убери фразы, что портфолио или опыта по теме нет, — так заказчик уйдёт. Вместо "
+                                        "этого назови самые близкие работы из списка и чем они похожи. Остальное оставь. "
+                                        "Выведи только новый текст ответа."}])
+    return text
+
+
+# «портфолио по полиграфии нет», «отдельного раздела … нет», «опыта … не было»
+SELF_DOWN = r"(портфолио|раздел\w*|опыт\w*|примеров|работ)[^.!?]{0,50}\b(нет|не было|отсутству)"
 
 
 def revise(item: dict, old: str, wish: str) -> str:
@@ -255,6 +278,8 @@ def problems(text: str) -> list[str]:
     probs = [b for b in fl_watch.BANNED if b not in (r"\bделал[аи]?\b",) and re.search(b, text, re.I)]
     if re.search(r"\*\*|^#+ ", text, re.M):
         probs.append("markdown — в чате будут видны звёздочки")
+    if re.search(SELF_DOWN, text, re.I):
+        probs.append("пишет, что портфолио/опыта нет — замени на близкие работы")
     if len(text) > 4000:
         probs.append(f"длинно: {len(text)} символов")
     return probs
@@ -326,10 +351,15 @@ async def send_reply(item: dict, text: str) -> bool:
                 await page.wait_for_timeout(5000)
                 hist = await kwork_history(ctx.request, item["peer_id"], item["peer"])
             else:
-                box = page.locator("textarea:visible").last
+                # поле и кнопка — внутри формы чата; круглая button.uw__round-button рядом — виджет
+                # доступности сайта, не отправка. Кнопка «отправить» (div) появляется, только когда в поле есть текст
+                box = page.locator('.fl-messages-form textarea[data-id="qa-ui-textarea-message-chat"]').first
                 await box.fill(text)
+                await box.press("End"); await box.type(" "); await box.press("Backspace")
                 await page.wait_for_timeout(600)
-                await page.locator("button.uw__round-button:visible").last.click()
+                if len(await box.input_value()) < len(text) // 2:
+                    raise RuntimeError("текст не попал в поле сообщения FL.ru")
+                await page.locator('.fl-messages-form [data-id="qa-button-send"]').first.click()
                 await page.wait_for_timeout(5000)
                 r = await ctx.request.get(f"https://www.fl.ru/projects/{item['project_id']}/offers/{item['offer_id']}"
                                           "/messages/?limit=10&offset=0", headers=XHR)
