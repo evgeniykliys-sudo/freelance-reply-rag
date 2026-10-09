@@ -8,7 +8,7 @@ from sentence_transformers import SentenceTransformer
 CHROMA_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "freelance"
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-CLAUDE_MODEL = os.getenv("RAG_MODEL") or "claude-sonnet-5"
+CLAUDE_MODEL = os.getenv("RAG_MODEL") or "claude-sonnet-5-5"
 TOP_K = 10
 # ChromaDB по умолчанию использует squared L2 (не косинус 0-2!). Порог откалиброван
 # эмпирически на реальных примерах (см. scripts/calibrate.py): явные совпадения по
@@ -65,6 +65,11 @@ def _get_collection():
         client = chromadb.PersistentClient(path=str(CHROMA_DIR))
         _collection = client.get_collection(COLLECTION_NAME)
     return _collection
+
+
+def cached(system: str) -> list[dict]:
+    """Системный промпт с пометкой для кэша: правила одинаковые в каждом запросе, из кэша они в ~20 раз дешевле."""
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
 def _get_claude() -> Anthropic:

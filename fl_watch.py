@@ -38,7 +38,9 @@ UA = "Mozilla/5.0 (fl-watch; personal order notifier)"
 CATEGORIES = {2: "Сайты", 3: "Дизайн", 5: "Программирование", 30: "Маркетплейс менеджмент", 31: "AI",
               32: "Социальные сети", 34: "Мессенджеры", 35: "Рисунки и иллюстрации", 36: "Mobile",
               37: "Браузеры", 40: "Интернет-магазины", 41: "Автоматизация бизнеса", 42: "Фирменный стиль"}
-TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-4-5-20251001"
+TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-5-5"
+# Haiku 5.5 по умолчанию «думает» перед ответом — для коротких JSON-ответов это лишние токены и обрезанный ответ
+NO_THINKING = {"type": "disabled"}
 DISCOUNT = int(os.getenv("DISCOUNT_PCT") or 40)        # насколько ниже рынка/прайса предлагать на старте
 # минималка Евгения для обеих бирж: заказы с бюджетом ниже — не берём, и сами дешевле не предлагаем
 MIN_BUDGET = int(os.getenv("MIN_BUDGET") or os.getenv("KWORK_MIN_BUDGET") or 2500)
@@ -226,7 +228,7 @@ big=true — проект явно крупный для одного челов
 
 
 def triage(client: Anthropic, o: Order) -> dict:
-    r = client.messages.create(model=TRIAGE_MODEL, max_tokens=200, system=TRIAGE, messages=[{"role": "user", "content":
+    r = client.messages.create(model=TRIAGE_MODEL, max_tokens=400, system=TRIAGE, thinking=NO_THINKING, messages=[{"role": "user", "content":
         f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\nЗаголовок: {o.title}\nОписание: {o.desc[:4000]}"}])
     text = "".join(b.text for b in r.content if b.type == "text")
     m = re.search(r"\{.*\}", text, re.S)
@@ -351,7 +353,7 @@ def draft(o: Order) -> dict:
     messages = [{"role": "user", "content": posting_blocks(o, intro)}]
     for attempt in range(2):
         try:
-            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
                                                   messages=messages)
         except anthropic.BadRequestError:
             # модель не приняла вложение (битый файл, не тот формат) — пишем по тексту заказа, а не падаем
@@ -361,7 +363,7 @@ def draft(o: Order) -> dict:
             log.warning("заказ %s: вложения не приняты моделью, черновик без них", o.id)
             o.att = {**(o.att or {}), "read": [], "error": "нейросеть не приняла вложения — черновик по тексту заказа"}
             messages = [{"role": "user", "content": posting_blocks(o, intro, with_files=False)}]
-            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+            r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
                                                   messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
         reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
@@ -386,7 +388,7 @@ def draft(o: Order) -> dict:
                                 "несколько макетов) — назови рыночную цену и реальный срок на всё ТЗ. Не урезай состав "
                                 "и не выноси части в отдельный этап. "
                                 "Формат тот же: СУТЬ / ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
                                               messages=messages)
         text2 = "".join(b.text for b in r.content if b.type == "text").strip()
         second = parse_draft(text2)
@@ -403,7 +405,7 @@ def draft(o: Order) -> dict:
                                 "отдельным абзацем, начинающимся словами пункта. Про примеры работ — назови самые близкие "
                                 "работы из портфолио и прикрепи их. Цену и срок не меняй. "
                                 "Формат тот же: СУТЬ / ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o),
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
                                               messages=messages)
         third = parse_draft("".join(b.text for b in r.content if b.type == "text").strip())
         if third.get("reply") and len(third["reply"]) > 150:
@@ -426,7 +428,7 @@ ASKED = """Ниже заказ с фриланс-биржи и отклик ис
 def unanswered(o: Order, reply: str) -> list[str]:
     """Какие пункты из «в отклике укажите» остались без ответа (дешёвая модель). Ошибка проверки — не мешаем черновику."""
     try:
-        r = rag._get_claude().messages.create(model=TRIAGE_MODEL, max_tokens=400, system=ASKED, messages=[{
+        r = rag._get_claude().messages.create(model=TRIAGE_MODEL, max_tokens=600, system=ASKED, thinking=NO_THINKING, messages=[{
             "role": "user", "content": f"ЗАКАЗ:\n{o.title}\n\n{o.desc[:6000]}\n\nОТКЛИК:\n{reply}"}])
         m = re.search(r"\{.*\}", "".join(b.text for b in r.content if b.type == "text"), re.S)
         return [str(x)[:120] for x in json.loads(m.group(0)).get("missing", [])][:6]
@@ -517,10 +519,10 @@ def revise(o: Order, d: dict, wish: str) -> dict:
                                         "пересчитай ЦЕНУ и СРОК под новый объём по тем же правилам, не втискивай больше "
                                         "работы в прежние цифры. Формат тот же: ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
     try:
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)), messages=msgs)
     except anthropic.BadRequestError:
         msgs[0]["content"] = posting_blocks(o, "", with_files=False)      # вложение не принято — правим без него
-        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=draft_system(o), messages=msgs)
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)), messages=msgs)
     text = "".join(b.text for b in r.content if b.type == "text")
     new = parse_draft(text)
     # если модель потеряла цену/срок/работы — оставляем прежние

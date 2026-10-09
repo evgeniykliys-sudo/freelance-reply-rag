@@ -238,7 +238,7 @@ def conversation(item: dict, file_blocks: list[dict]) -> list[dict]:
 def ask(item: dict, content: list[dict], extra: list[dict] | None = None) -> str:
     site = "Kwork" if item["site"] == "kwork" else "FL.ru"
     msgs = [{"role": "user", "content": content}] + (extra or [])
-    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=2500, system=SYSTEM.format(site=site),
+    r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=2500, system=rag.cached(SYSTEM.format(site=site)),
                                           messages=msgs)
     return "".join(b.text for b in r.content if b.type == "text").strip()
 
