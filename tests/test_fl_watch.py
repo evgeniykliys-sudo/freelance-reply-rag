@@ -227,6 +227,22 @@ res = asyncio.run(fw.run_once(None, None, dry=True, fetch=_fetch2))
 check("два заказа разбираются параллельно, а не друг за другом", len(res) == 2 and time.time() - t0 < 1.8)
 fw.triage, fw.draft = _tri, _draft
 
+class _Fake:
+    """Клиент-заглушка: отвечает заданным JSON, как сортировщик."""
+    def __init__(self, text):
+        self.messages = self
+        self.text = text
+
+    def create(self, **kw):
+        return type("R", (), {"content": [type("B", (), {"type": "text", "text": self.text})()]})()
+
+sus = fw.triage(_Fake('{"take": false, "reason": "задания за скриншоты", "risk": "похоже на накрутку"}'), by["5524601"])
+hard = fw.triage(_Fake('{"take": false, "reason": "вакансия в штат", "risk": ""}'), by["5524601"])
+check("подозрение — карточка всё равно придёт (take=true с пометкой), явный отказ — нет",
+      sus["take"] and sus["risk"] and not hard["take"])
+check("пометка о сомнительной схеме — в карточке",
+      "похоже на сомнительную схему" in fw.card(by["5524601"], {"risk": "задания за скриншоты"}, good))
+
 ok_reply = "Примеры работ: прикрепил сайт на Tilda — похож структурой и заявками. " * 3
 check("пункт заказчика без ответа — в замечаниях",
       any("Примеры" in p for p in fw.draft_problems({"reply": ok_reply, "price": 9000, "days": 2,
