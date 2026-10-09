@@ -197,5 +197,15 @@ mvp.desc = "Сначала нужен MVP за небольшой бюджет, 
 check("заказчик сам просит MVP — отдельный этап без замечания",
       not any("этап" in p for p in fw.draft_problems({"reply": split * 3, "price": 30000, "days": 6}, mvp)))
 
+ok_reply = "Примеры работ: прикрепил сайт на Tilda — похож структурой и заявками. " * 3
+check("пункт заказчика без ответа — в замечаниях",
+      any("Примеры" in p for p in fw.draft_problems({"reply": ok_reply, "price": 9000, "days": 2,
+                                                       "unanswered": ["Примеры аналогичных сайтов"]})))
+check("«прямого опыта … нет, честно скажу» — ловится",
+      len(fw.draft_problems({"reply": "Прямого опыта на WordPress для инженерной компании в портфолио нет, честно скажу. " * 3,
+                             "price": 9000, "days": 2})) >= 2)
+check("длинный отклик на FL.ru без «Kwork обрежет»",
+      not any("Kwork" in p for p in fw.draft_problems({"reply": ok_reply * 12, "price": 9000, "days": 2}, by["5524601"])))
+
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")
 sys.exit(0 if ok else 1)
