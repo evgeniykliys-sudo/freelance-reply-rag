@@ -500,7 +500,7 @@ def fit_days(d: dict) -> dict:
 
 
 BANNED = [r"\bделал[аи]?\b", r"не первый раз", r"уже (настраивал|делал|работал)", r"\bЕвгений\b", r"опыта (нет|пока нет)",
-          r"опыт\w*[^.!?]{0,70}(не было|нет|не делал)", r"честно (скажу|признаюсь)", r"без делени\w* на[^.!?]{0,20}этап", r"честно не (сделать|успеть)",
+          r"опыт\w*[^.!?]{0,70}(не было|нет|не делал)", r"честно (скажу|признаюсь)", r"без делени\w* на[^.!?]{0,20}этап", r"честно не (сделать|успеть)", r"(входит|всё) в одну цену",
           r"@\w{4,}", r"\+?\d[\d\s()-]{9,}\d", r"t\.me/", r"предоплат", r"github", r"https?://", r"www\."]
 
 
@@ -600,6 +600,9 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
         lines.append("📄 ТЗ прочитано: " + e(", ".join(att["read"])))
     if att.get("skipped") or att.get("error"):
         lines.append("⚠️ вложения: " + e("; ".join(att.get("skipped", []) + ([att["error"]] if att.get("error") else []))))
+    elif not att.get("read") and re.search(MENTIONS_FILE, o.desc, re.I):
+        # заказчик пишет «ТЗ в закрепе», а файла бот не нашёл (так было, когда FL сменил формат ссылок) — не молчим
+        lines.append("⚠️ в заказе упомянуто ТЗ/вложение, но файл я не нашёл — открой заказ и посмотри сам")
     if tri.get("learn"):
         lines.append(f"🎓 освоить: {e(tri['learn'])}")
     titles = {w["id"]: w["title"] for w in fl_submit.PORTFOLIO}
@@ -727,6 +730,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
 
 
 PARALLEL = int(os.getenv("DRAFT_PARALLEL") or 3)
+MENTIONS_FILE = r"в\s+закреп|во\s+вложени|прикреп\w*\s+(файл|ТЗ|документ)|ТЗ\s+(прилага|приложен)|см\.?\s+файл|в\s+файле"
 LATE_MIN = 5          # проверяем раз в минуту — старше этого при первой встрече значит «задержался в ленте»
 STARTED = datetime.now(timezone.utc)   # заказы, опубликованные, пока бот был выключен, «задержавшимися» не считаем
 

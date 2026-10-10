@@ -248,6 +248,13 @@ check("длинный отклик: карточка в лимите и разм
       len(long_card) <= 4000 and long_card.count("<code>") == long_card.count("</code>") == 1
       and long_card.count("<i>") == long_card.count("</i>") and "полный текст" in long_card)
 
+new_fmt = """<div class="b-layout mt-22 base-attach-class"><a class="text-link"href='https://st.fl.ru/projects/upload/202610/f_2186aca428c314ae.docx' target="_blank">ТЗ_сайт.docx</a></div>"""
+check("FL.ru: вложения нового вида st.fl.ru/projects/upload находятся",
+      at.fl_links(new_fmt) == [{"name": "ТЗ_сайт.docx", "url": "https://st.fl.ru/projects/upload/202610/f_2186aca428c314ae.docx"}])
+check("«ТЗ в закрепе», а файла нет — предупреждение в карточке",
+      "файл я не нашёл" in fw.card(dataclasses.replace(by["5524601"], desc="Нужен лендинг. ТЗ в закрепе"), {}, good)
+      and "файл я не нашёл" not in fw.card(by["5524601"], {}, good))
+
 nb = by["5524601"]
 check("проектирование и чертежи — не берём (рубрика или слова), сайт для архитекторов и «пришлите ПДФ» — берём",
       fw.narrow(dataclasses.replace(nb, title="Разработка раздела АР", desc="раздел АР ПСД", category="Дизайн / Архитектура"))

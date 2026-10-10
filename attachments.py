@@ -133,11 +133,12 @@ def to_blocks(paths: list[Path]) -> tuple[list[dict], list[str], list[str]]:
 
 
 def fl_links(page_html: str) -> list[dict]:
-    """Вложения со страницы заказа FL.ru (блок base-attach-class, ссылки /download/files/…)."""
+    """Вложения со страницы заказа FL.ru (блок base-attach-class). Ссылки бывают двух видов:
+    www.fl.ru/download/files/… (старый) и st.fl.ru/projects/upload/… (с 10.10.2026) — берём оба."""
     out = []
     # в исходнике FL.ru бывает href='…' без пробела перед ним — кавычки любые
-    for href, name in re.findall(r"""<a[^>]*href=["'](https://www\.fl\.ru/download/files/[^"']+)["'][^>]*>([^<]*)</a>""",
-                                 page_html):
+    for href, name in re.findall(r"""<a[^>]*href=["'](https://(?:www\.fl\.ru/download/files|st\.fl\.ru/projects/upload)/"""
+                                 r"""[^"']+)["'][^>]*>([^<]*)</a>""", page_html):
         if href not in [f["url"] for f in out]:
             out.append({"name": html.unescape(name).strip(), "url": href})
     return out
