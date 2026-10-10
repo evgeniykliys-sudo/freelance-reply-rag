@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 import fl_submit
 import inbox_watch
+from inbox_watch import ack
 import kwork_submit
 import fl_watch
 from rag import draft_reply
@@ -88,7 +89,7 @@ async def cmd_cost(message: Message):
 async def on_edit(cb: CallbackQuery):
     order_id = cb.data.split(":", 1)[1]
     pending_edit[cb.from_user.id] = order_id
-    await cb.answer()
+    await ack(cb)
     await cb.message.answer("Что поправить в черновике? Например: «короче», «цена 3 000», «убери про Figma».",
                             reply_markup=ForceReply(input_field_placeholder="пожелание к черновику"))
 
@@ -110,16 +111,16 @@ async def on_approve(cb: CallbackQuery):
     c = fl_watch.db()
     got = fl_watch.load_draft(c, order_id)
     if not got:
-        await cb.answer("Не нашёл этот заказ", show_alert=True)
+        await ack(cb, "Не нашёл этот заказ", show_alert=True)
         return
     o, tri, d, _, ver = got
     if not d.get("price") or not d.get("days"):
-        await cb.answer("В черновике нет цены или срока — поправь через «Править»", show_alert=True)
+        await ack(cb, "В черновике нет цены или срока — поправь через «Править»", show_alert=True)
         return
     if o.source == "kwork":
         await approve_kwork(cb, c, o, d, order_id)
         return
-    await cb.answer("Заполняю форму отклика…")
+    await ack(cb, "Заполняю форму отклика…")
     wait = await cb.message.answer("⏳ Открываю заказ в Chrome и заполняю форму (не отправляю)…")
     try:
         st = await fl_submit.prepare(o.link, d["reply"], d["price"], d["days"], d.get("works", []), order_id)
@@ -146,7 +147,7 @@ async def on_approve(cb: CallbackQuery):
 
 
 async def approve_kwork(cb: CallbackQuery, c, o, d, order_id: str):
-    await cb.answer("Заполняю форму предложения…")
+    await ack(cb, "Заполняю форму предложения…")
     wait = await cb.message.answer("⏳ Открываю заказ на Kwork в Chrome и заполняю форму (не отправляю)…")
     try:
         st = await kwork_submit.prepare(o.link, d["reply"], d["price"], d["days"], o.title, order_id)
@@ -177,15 +178,15 @@ async def on_send(cb: CallbackQuery):
     c = fl_watch.db()
     got = fl_watch.load_draft(c, order_id)
     if not got:
-        await cb.answer("Не нашёл этот заказ", show_alert=True)
+        await ack(cb, "Не нашёл этот заказ", show_alert=True)
         return
     o, tri, d, status, _ = got
     if status in ("sending", "sent_fl", "sent_kw"):
-        await cb.answer("Уже отправлено или отправляется", show_alert=True)
+        await ack(cb, "Уже отправлено или отправляется", show_alert=True)
         return
     c.execute("update drafts set status='sending' where order_id=?", (order_id,))
     c.commit()
-    await cb.answer("Отправляю…")
+    await ack(cb, "Отправляю…")
     await cb.message.edit_reply_markup(reply_markup=None)
     kw = o.source == "kwork"
     try:
@@ -219,7 +220,7 @@ async def on_send(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("cancel:"))
 async def on_cancel(cb: CallbackQuery):
-    await cb.answer("Не отправляю")
+    await ack(cb, "Не отправляю")
     await cb.message.edit_reply_markup(reply_markup=None)
     await cb.message.answer("Ок, отклик не отправлен. Карточку можно поправить и утвердить снова.")
 
