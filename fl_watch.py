@@ -615,11 +615,18 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
         lines.append("❗ проверь черновик: " + e(", ".join(probs)))
     head = "✅ <b>Утверждённый отклик</b>" if status == "approved" else (
         f"<b>Черновик отклика</b>" + (f" · версия {version}" if version > 1 else ""))
-    lines += ["", head + " (нажми, чтобы скопировать):", f"<code>{e(d['reply'])}</code>"]
-    if status != "approved":
-        lines += ["", "<i>Пожелание по правке — кнопка «Править» или ответь (reply) на это сообщение.</i>"]
-    msg = "\n".join(lines)
-    return msg[:4000]
+    tail = ["", "<i>Пожелание по правке — кнопка «Править» или ответь (reply) на это сообщение.</i>"] \
+        if status != "approved" else []
+    # лимит Telegram ~4096: режем сам текст отклика, а не готовый HTML — иначе обрезается закрывающий </code>,
+    # Telegram отвергает карточку целиком, и заказ приходит с опозданием на 20 минут
+    reply = d["reply"]
+    while True:
+        cut = len(reply) < len(d["reply"])
+        body = e(reply) + ("…\n[полный текст — в форме отклика после «Утвердить»]" if cut else "")
+        msg = "\n".join(lines + ["", head + " (нажми, чтобы скопировать):", f"<code>{body}</code>"] + tail)
+        if len(msg) <= 4000 or not reply:
+            return msg
+        reply = reply[:max(0, len(reply) - (len(msg) - 4000) - 60)]
 
 
 def keyboard(order_id: str, url: str, status: str = "new") -> dict:
@@ -632,13 +639,20 @@ def keyboard(order_id: str, url: str, status: str = "new") -> dict:
 
 async def send(session, token, chat, text, url, order_id) -> int | None:
     """Отправляет карточку, возвращает message_id (нужен, чтобы потом найти заказ по ответу на сообщение)."""
-    async with session.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-            "chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
-            "reply_markup": keyboard(order_id, url)}) as r:
-        if r.status != 200:
-            log.warning("Telegram: %s %s", r.status, (await r.text())[:200])
-            return None
-        return (await r.json())["result"]["message_id"]
+    for parse in ("HTML", None):
+        body = {"chat_id": chat, "text": text if parse else html.unescape(re.sub(r"<[^>]+>", "", text)),
+                "disable_web_page_preview": True, "reply_markup": keyboard(order_id, url)}
+        if parse:
+            body["parse_mode"] = parse
+        async with session.post(f"https://api.telegram.org/bot{token}/sendMessage", json=body) as r:
+            if r.status == 200:
+                return (await r.json())["result"]["message_id"]
+            err = (await r.text())[:200]
+            log.warning("Telegram: %s %s", r.status, err)
+            if "parse entities" not in err:
+                return None
+            # разметка сломалась — шлём карточку простым текстом, а не переписываем черновик на следующем проходе
+    return None
 
 
 # ---------- цикл ----------
