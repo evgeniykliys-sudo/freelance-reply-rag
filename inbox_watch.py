@@ -37,6 +37,7 @@ FL_COUNTERS = {"orders": "в «Сделках»", "tservices": "по услуг�
 
 router = Router()
 pending: dict[int, tuple[int, str]] = {}        # кто → (карточка, "edit" | "own") — ждём текст после кнопки
+_chrome_restarted = -1e9                        # когда последний раз сами запускали Chrome бота
 
 
 # ---------- хранилище ----------
@@ -378,7 +379,19 @@ async def run_once(bot, chat: int) -> int:
         try:
             browser = await p.chromium.connect_over_cdp(CDP, timeout=8000)
         except Exception:
-            log.info("Chrome не запущен — сообщения не проверяю")
+            if fl_submit.chrome_up():
+                log.info("Chrome не ответил — сообщения проверю в следующий раз")
+                return 0
+            global _chrome_restarted
+            now = asyncio.get_running_loop().time()
+            if now - _chrome_restarted < 600:            # уже запускали недавно — не спамим и не плодим окна
+                return 0
+            _chrome_restarted = now
+            log.warning("Chrome бота закрыт — запускаю заново")
+            fl_submit.start_chrome()
+            await bot.send_message(chat, "🔄 Chrome бота был закрыт — запустил его заново (свёрнут). Без него я не читаю "
+                                         "файлы ТЗ, сообщения заказчиков и не отправляю отклики — не закрывайте его, "
+                                         "просто сворачивайте.")
             return 0
         req = browser.contexts[0].request
         for name, fn in (("Kwork", kwork_new), ("FL", fl_new)):
