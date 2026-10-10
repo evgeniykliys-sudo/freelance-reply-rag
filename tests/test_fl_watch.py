@@ -243,6 +243,13 @@ check("подозрение — карточка всё равно придёт 
 check("пометка о сомнительной схеме — в карточке",
       "похоже на сомнительную схему" in fw.card(by["5524601"], {"risk": "задания за скриншоты"}, good))
 
+nb = by["5524601"]
+check("проектирование и чертежи — не берём (рубрика или слова), сайт для архитекторов и «пришлите ПДФ» — берём",
+      fw.narrow(dataclasses.replace(nb, title="Разработка раздела АР", desc="раздел АР ПСД", category="Дизайн / Архитектура"))
+      and fw.narrow(dataclasses.replace(nb, title="Чертежи", desc="Перечертить план в AutoCAD", category="Дизайн / Чертежи"))
+      and not fw.narrow(dataclasses.replace(nb, title="Сайт для АРХИТЕКТУРНОГО бюро", desc="МАРКЕТИНГ", category="Сайты / Лендинги"))
+      and not fw.narrow(dataclasses.replace(nb, title="Логотип", desc="пришлите ПДФ", category="Дизайн / Логотипы")))
+
 ok_reply = "Примеры работ: прикрепил сайт на Tilda — похож структурой и заявками. " * 3
 check("пункт заказчика без ответа — в замечаниях",
       any("Примеры" in p for p in fw.draft_problems({"reply": ok_reply, "price": 9000, "days": 2,

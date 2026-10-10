@@ -13,6 +13,24 @@ from playwright.async_api import async_playwright
 
 log = logging.getLogger("fl_submit")
 CDP = os.getenv("CHROME_CDP") or "http://localhost:9333"
+CHROME_EXE = os.getenv("CHROME_EXE") or r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+CHROME_PROFILE = os.getenv("CHROME_PROFILE") or r"C:\Projects\_docs\fl-profile\.chrome-fl"
+
+
+def chrome_up() -> bool:
+    import socket
+    port = int(CDP.rsplit(":", 1)[1].strip("/"))
+    with socket.socket() as s:
+        s.settimeout(2)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def start_chrome():
+    """Тот же запуск, что start_chrome_fl.bat, но свёрнутым окном: Chrome бота закрыли — без него нет ТЗ, чатов, откликов."""
+    import subprocess
+    port = CDP.rsplit(":", 1)[1].strip("/")
+    subprocess.Popen([CHROME_EXE, f"--remote-debugging-port={port}", f"--user-data-dir={CHROME_PROFILE}",
+                      "--no-first-run", "--start-minimized", "https://www.fl.ru/"])
 SHOTS = Path(__file__).parent / "shots"
 PORTFOLIO = json.loads((Path(__file__).parent / "fl_portfolio.json").read_text(encoding="utf-8"))  # [{id, title}]
 
