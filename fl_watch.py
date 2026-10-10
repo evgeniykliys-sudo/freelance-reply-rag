@@ -112,6 +112,7 @@ class Order:
     max_budget: int | None = None       # Kwork: до какой суммы заказчик готов поднять цену
     files: list | None = None           # вложения [{name, url}] (у Kwork — из списка, у FL.ru — со страницы)
     att: dict | None = None             # что вышло со скачиванием: {"read": [...], "skipped": [...], "error": ...}
+    late: int | None = None             # через сколько минут после публикации заказ впервые попал в ленту (модерация FL)
 
     @property
     def platform(self) -> str:
@@ -588,7 +589,8 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
     if o.competitors is not None:
         budget += f" · 👥 откликов: {o.competitors}"
     lines = [f"🆕 <b>[{o.platform}] {e(o.title)}</b>",
-             f"📂 {e(o.category)} · ⏱ {age} мин назад",
+             f"📂 {e(o.category)} · ⏱ {age} мин назад"
+             + (f" (в ленте {o.platform} появился только сейчас — видимо, был на модерации)" if o.late else ""),
              budget,
              "", f"<i>{e(o.desc[:400])}{'…' if len(o.desc) > 400 else ''}</i>", ""]
     if d.get("price"):
@@ -678,6 +680,10 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
         if o.budget and o.budget < MIN_BUDGET:                 # FL.ru: у Kwork такие отсекаются ещё в kwork_watch
             mark(c, o.id, f"skip: бюджет {o.budget} < {MIN_BUDGET}"); done.append((o, {"reason": "дешевле минималки"}, None))
             continue
+        # ленту проверяем раз в минуту: если заказ «старше» 5 минут при первой встрече — он появился в ленте с опозданием
+        if not fresh_db and age_h * 60 > LATE_MIN and o.published > STARTED:
+            o.late = round(age_h * 60)
+            log.info("заказ %s появился в ленте через %s мин после публикации", o.id, o.late)
         todo.append(o)
 
     async def handle(o: Order):
@@ -721,6 +727,8 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
 
 
 PARALLEL = int(os.getenv("DRAFT_PARALLEL") or 3)
+LATE_MIN = 5          # проверяем раз в минуту — старше этого при первой встрече значит «задержался в ленте»
+STARTED = datetime.now(timezone.utc)   # заказы, опубликованные, пока бот был выключен, «задержавшимися» не считаем
 
 
 async def watch_forever(token, chat, every=60):
