@@ -39,6 +39,15 @@ router = Router()
 pending: dict[int, tuple[int, str]] = {}        # кто → (карточка, "edit" | "own") — ждём текст после кнопки
 _chrome_restarted = -1e9                        # когда последний раз сами запускали Chrome бота
 
+async def ack(cb, text: str | None = None, **kw):
+    """Ответ на нажатие кнопки. Если бот перезапускался, Telegram считает нажатие «старым» и отвечать на него нельзя —
+    не падаем, а выполняем само действие (иначе «Утвердить» молча ничего не делает)."""
+    try:
+        await cb.answer(text, **kw)
+    except Exception:
+        pass
+
+
 
 # ---------- хранилище ----------
 def db() -> sqlite3.Connection:
@@ -437,15 +446,15 @@ async def on_send(cb: CallbackQuery):
     c = db()
     got = load(c, item_id)
     if not got:
-        await cb.answer("Не нашёл это сообщение", show_alert=True)
+        await ack(cb, "Не нашёл это сообщение", show_alert=True)
         return
     item, text, status = got
     if status in ("sending", "sent"):
-        await cb.answer("Уже отправлено или отправляется", show_alert=True)
+        await ack(cb, "Уже отправлено или отправляется", show_alert=True)
         return
     c.execute("update chat_items set status='sending' where id=?", (item_id,))
     c.commit()
-    await cb.answer("Отправляю…")
+    await ack(cb, "Отправляю…")
     await cb.message.edit_reply_markup(reply_markup=None)
     try:
         ok = await send_reply(item, text)
@@ -470,7 +479,7 @@ async def on_send(cb: CallbackQuery):
 async def on_edit(cb: CallbackQuery):
     item_id, mode = int(cb.data[3:]), ("edit" if cb.data.startswith("ce:") else "own")
     pending[cb.from_user.id] = (item_id, mode)
-    await cb.answer()
+    await ack(cb)
     if mode == "edit":
         await cb.message.answer("Что поправить в ответе? Например: «короче», «цена 6 000», «спроси про хостинг».",
                                 reply_markup=ForceReply(input_field_placeholder="пожелание к ответу"))
@@ -484,7 +493,7 @@ async def on_skip(cb: CallbackQuery):
     c = db()
     c.execute("update chat_items set status='skipped' where id=?", (int(cb.data[3:]),))
     c.commit()
-    await cb.answer("Ок, без ответа")
+    await ack(cb, "Ок, без ответа")
     await cb.message.edit_reply_markup(reply_markup=None)
 
 
