@@ -72,10 +72,44 @@ def cached(system: str) -> list[dict]:
     return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
+# цены $ за миллион токенов: вход, выход, запись в кэш, чтение из кэша (claude.com/pricing, октябрь 2026)
+PRICES = {"claude-sonnet-5-5": (2, 10, 2.5, 0.1), "claude-sonnet-5": (2, 10, 2.5, 0.2),
+          "claude-haiku-5-5": (0.1, 0.5, 0.125, 0.01), "claude-haiku-4-5-20251001": (1, 5, 1.25, 0.1)}
+USAGE_DB = Path(__file__).parent / "fl_seen.db"
+
+
+def cost_usd(model: str, inp: int, out: int, cw: int, cr: int) -> float:
+    p = PRICES.get(model, PRICES["claude-sonnet-5-5"])
+    return (inp * p[0] + out * p[1] + cw * p[2] + cr * p[3]) / 1e6
+
+
+def _log_usage(model: str, u):
+    """Каждый запрос к API — строка в api_usage: по ней бот считает реальный расход (команда /cost)."""
+    try:
+        import sqlite3
+        from datetime import datetime
+        row = (model, u.input_tokens, u.output_tokens, u.cache_creation_input_tokens or 0, u.cache_read_input_tokens or 0)
+        c = sqlite3.connect(USAGE_DB)
+        c.execute("create table if not exists api_usage (at text, model text, inp int, out int, cw int, cr int, usd real)")
+        c.execute("insert into api_usage values (?,?,?,?,?,?,?)",
+                  (datetime.now().isoformat(timespec="seconds"), *row, cost_usd(*row)))
+        c.commit()
+        c.close()
+    except Exception:
+        pass                                   # учёт не должен ломать черновики
+
+
 def _get_claude() -> Anthropic:
     global _client
     if _client is None:
         _client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        create = _client.messages.create
+
+        def counted(**kw):
+            r = create(**kw)
+            _log_usage(kw.get("model", ""), r.usage)
+            return r
+        _client.messages.create = counted
     return _client
 
 

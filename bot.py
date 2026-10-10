@@ -4,7 +4,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramNetworkError
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
@@ -32,7 +32,8 @@ HELP_TEXT = (
     "«✅ Утвердить» — зафиксирую итоговый текст.\n\n"
     "Сообщения от заказчиков Kwork и FL.ru тоже присылаю сюда с черновиком ответа: «🚀 Отправить», «✏️ Править», "
     "«✍️ Свой текст» (отправлю твой текст как есть) или «Без ответа». Без кнопки заказчику ничего не уходит.\n\n"
-    "Можно и вручную: пришли текст любого заказа — предложу черновик отклика по базе услуг."
+    "Можно и вручную: пришли текст любого заказа — предложу черновик отклика по базе услуг.\n\n"
+    "/cost — сколько потрачено на нейросеть: сегодня, за неделю, за месяц."
 )
 
 # бот личный: чужим не отвечает (иначе любой может тратить ваш ключ нейросети)
@@ -53,6 +54,34 @@ def kb(order_id: str, url: str, status: str = "new") -> InlineKeyboardMarkup:
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(HELP_TEXT)
+
+
+@dp.message(Command("cost"))
+async def cmd_cost(message: Message):
+    """Реальный расход на нейросеть по строкам api_usage (пишутся с 10.10.2026)."""
+    import sqlite3
+    import aiohttp
+    c = sqlite3.connect(fl_watch.DB)
+    c.execute("create table if not exists api_usage (at text, model text, inp int, out int, cw int, cr int, usd real)")
+    rows = {name: c.execute(f"select count(*), coalesce(sum(usd), 0) from api_usage where at >= date('now', 'localtime', '{d}')").fetchone()
+            for name, d in (("сегодня", "start of day"), ("7 дней", "-6 days"), ("30 дней", "-29 days"))}
+    drafts = c.execute("select count(*) from seen where verdict='sent' and at >= date('now', 'localtime', '-6 days')").fetchone()[0]
+    rate = None
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://www.cbr-xml-daily.ru/daily_json.js", timeout=aiohttp.ClientTimeout(total=10)) as r:
+                rate = (await r.json(content_type=None))["Valute"]["USD"]["Value"]
+    except Exception:
+        pass
+    rub = (lambda usd: f" ≈ {usd * rate:,.0f} ₽".replace(",", " ")) if rate else (lambda usd: "")
+    lines = [f"💸 Расход на нейросеть" + (f" (курс ЦБ {rate:.2f} ₽/$)" if rate else "")]
+    for name, (n, usd) in rows.items():
+        lines.append(f"{name}: ${usd:.2f}{rub(usd)} · запросов {n}")
+    week = rows["7 дней"][1]
+    if drafts:
+        lines.append(f"на один черновик за 7 дней: ${week / drafts:.3f}{rub(week / drafts)} (черновиков {drafts})")
+    lines.append(f"прогноз на месяц по последним 7 дням: ${week / 7 * 30:.0f}{rub(week / 7 * 30)}")
+    await message.answer("\n".join(lines))
 
 
 @dp.callback_query(F.data.startswith("edit:"))
