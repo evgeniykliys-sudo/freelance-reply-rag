@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramNetworkError
@@ -280,6 +282,11 @@ async def stop_at_night():
 
 
 async def main():
+    # пауза «на сегодня»: в pause_until.txt дата (ГГГГ-ММ-ДД) — до неё включительно бот не запускается
+    pause = Path(__file__).parent / "pause_until.txt"
+    if pause.exists() and pause.read_text(encoding="utf-8").strip() >= datetime.now(fl_watch.NSK).date().isoformat():
+        logging.info("бот на паузе до %s включительно (pause_until.txt)", pause.read_text(encoding="utf-8").strip())
+        return
     lock = fl_watch.single_instance()
     if lock is None:
         logging.info("бот уже запущен — второй экземпляр не нужен")

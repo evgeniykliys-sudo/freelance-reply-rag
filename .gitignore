@@ -7,3 +7,4 @@ fl_seen.db
 *.log
 shots/
 att/
+pause_until.txt
