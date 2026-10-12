@@ -163,6 +163,15 @@ async def send_now(cb: CallbackQuery, order_id: str):
         return
     kw = o.source == "kwork"
     site = "Kwork" if kw else "FL.ru"
+    found = fl_watch.contacts_in(d["reply"])
+    if found:
+        # ник, телефон, ссылка или почта в отклике — биржа может заблокировать аккаунт; отправлять не будем
+        await ack(cb)
+        await cb.message.answer(f"⚠️ <b>Не отправляю</b>: в тексте контакты — {html.escape(', '.join(found))}. "
+                                f"{site} за такое может заблокировать аккаунт. Убери их через «✏️ Править» "
+                                "(например: «убери ник и ссылку») и утверди снова.", parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup.model_validate(fl_watch.keyboard(order_id, o.link)))
+        return
     c.execute("update drafts set status='sending' where order_id=?", (order_id,))
     c.commit()
     await ack(cb, f"Отправляю на {site}…")
@@ -201,7 +210,7 @@ async def send_now(cb: CallbackQuery, order_id: str):
     else:
         c.execute("update drafts set status='new' where order_id=?", (order_id,))
         c.commit()
-        text = (f"⚠️ <b>Отклик не отправлен</b>: {html.escape(problem or f'не вижу его на {site}')}.\n"
+        text = (f"⚠️ <b>Отклик не отправлен</b>: {html.escape((problem or f'не вижу его на {site}').rstrip('.'))}.\n"
                 + ("Открой заказ и проверь вручную, прежде чем отправлять ещё раз." if not problem or "дождался" in problem
                    else "Поправь и нажми «Утвердить и отправить» ещё раз."))
     markup = (InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Открыть заказ на {site}", url=o.link)]])

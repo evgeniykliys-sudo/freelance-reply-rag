@@ -151,5 +151,18 @@ o = order("105")
 cb, st, text, kw, n = run("105", submit=already)
 check("отклик уже был — об этом сказано, второй не отправляется", st == "sent_fl" and "уже был" in text)
 
+# 9. настоящие контакты в тексте — не отправляем; «Telegram»/«почта» как слова — отправляем
+o = order("106")
+c.execute("update drafts set draft_json=? where order_id='106'",
+          (__import__("json").dumps({**DRAFT, "reply": "Сделаю бота. Пишите @tctravel или +7 913 123-45-67. " * 4}),)); c.commit()
+cb, st, text, kw, n = run("106", submit=good)
+check("ник и телефон в тексте — отправки нет, контакты названы", n == 0 and "@tctravel" in text and "Не отправляю" in text)
+o = order("kw3", source="kwork")
+c.execute("update drafts set draft_json=? where order_id='kw3'",
+          (__import__("json").dumps({**DRAFT, "reply": "Заявки придут вам в Telegram или на почту, подключу WhatsApp. " * 4}),)); c.commit()
+cb, st, text, kw, n = run("kw3", submit=kw_good)
+check("слова Telegram/почта/WhatsApp — не контакты, предложение уходит", n == 1 and st == "sent_kw")
+check("в тексте ошибки нет двойной точки", ".." not in run("103", submit=refuse, confirm=False)[2])
+
 print("\nИТОГ:", "все проверки пройдены" if ok else "ЕСТЬ ОШИБКИ")
 sys.exit(0 if ok else 1)
