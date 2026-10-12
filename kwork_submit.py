@@ -155,7 +155,7 @@ async def offer_exists(link: str) -> bool | None:
 
 
 async def submit(link: str, text: str, price: int, days: int, title: str) -> dict:
-    """Заполняет форму и сразу отправляет (предпросмотра нет). Если Kwork подсветил контакты/стоп-слова — не отправляет.
+    """Заполняет форму и сразу отправляет (предпросмотра нет). Текст с настоящими контактами сюда не доходит (bot.send_now).
     Каждый шаг пишется в лог: если отправка зависнет, видно, на каком месте."""
     if len(text) < 150:
         raise NotReady(f"Kwork требует от 150 символов, в черновике {len(text)} — допиши через «Править».")
@@ -169,9 +169,8 @@ async def submit(link: str, text: str, price: int, days: int, title: str) -> dic
             price = fit_price(price, st)
             log.info("отправка Kwork %s: заполняю форму", pid)
             filled = await _fill(page, text[:2000], price, days, title)
-            if filled.get("stopwords"):
-                raise NotReady("Kwork подсветил в тексте контакты/стоп-слова и не пропустит предложение — "
-                               "поправь текст через «Править» и утверди ещё раз.")
+            # плашка «Передача контактных данных запрещена…» — общее предупреждение Kwork на слова вроде «Telegram»,
+            # «почта»; отправке не мешает (7 таких предложений ушли). Настоящие контакты отсекает bot.send_now заранее
             log.info("отправка Kwork %s: нажимаю «Предложить»", pid)
             await page.locator("button:visible, .kw-button:visible").filter(has_text="Предложить").last.click()
             await page.wait_for_timeout(4000)
