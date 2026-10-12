@@ -269,6 +269,21 @@ check("профиль: боты, сайты, дизайн сайта, данны
                                     "Программирование / 1С-программирование", "AI — искусственный интеллект / Генерация видео",
                                     "Kwork / Дизайн / Полиграфия"]))
 
+kb0 = dataclasses.replace(k0, budget=70000, max_budget=200000)
+check("цена 21% от бюджета — «слишком дёшево»; 80–100% и до допустимого — ок; выше допустимого — пометка",
+      "дёшево" in fw.price_vs_budget(kb0, 15000) and fw.price_vs_budget(kb0, 60000) is None
+      and fw.price_vs_budget(kb0, 150000) is None and "выше" in fw.price_vs_budget(kb0, 250000)
+      and fw.price_vs_budget(dataclasses.replace(k0, budget=None), 3000) is None)
+check("цена втрое выше желаемого (в пределах допустимого) — мягкая пометка только в карточке",
+      fw.price_vs_budget(dataclasses.replace(k0, budget=15000, max_budget=45000), 45000) is None
+      and "проверь" in fw.price_vs_budget(dataclasses.replace(k0, budget=15000, max_budget=45000), 45000, soft=True))
+rh = lambda n, p: fw.rare_hirer(dataclasses.replace(k0, buyer_projects=n, buyer_hired=p))  # noqa: E731
+check("редко нанимает: 0% из 7, 27% из 43 — пропуск; новый (1 проект, 0%), 83% из 9, 40% из 9 — берём",
+      rh(7, 0) and rh(43, 27) and not rh(1, 0) and not rh(9, 83) and not rh(9, 40) and not rh(None, None))
+check("в карточке — сколько нанимает заказчик / «новый заказчик»",
+      "нанимает 83% (проектов 9)" in fw.card(dataclasses.replace(k0, buyer_projects=9, buyer_hired=83), {}, good)
+      and "новый заказчик" in fw.card(dataclasses.replace(k0, buyer_projects=1, buyer_hired=0), {}, good))
+
 nb = by["5524601"]
 check("проектирование и чертежи — не берём (рубрика или слова), сайт для архитекторов и «пришлите ПДФ» — берём",
       fw.narrow(dataclasses.replace(nb, title="Разработка раздела АР", desc="раздел АР ПСД", category="Дизайн / Архитектура"))
