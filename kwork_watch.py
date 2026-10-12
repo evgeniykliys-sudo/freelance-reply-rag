@@ -57,11 +57,14 @@ def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
         desc = html.unescape(w.get("description") or "").replace("\r\n", "\n").strip()
         budget = int(float(w.get("priceLimit") or 0)) or None
         max_budget = int(float(w.get("possiblePriceLimit") or 0)) or None
+        buyer = ((w.get("user") or {}).get("data") or {})          # «Размещено проектов» и «Нанято %» из карточки
+        num = lambda v: int(float(v)) if str(v or "").replace(".", "", 1).isdigit() else None  # noqa: E731
         out.append(Order(id=f"kw{w['id']}", title=html.unescape(w.get("name") or "").strip(),
                          link=f"https://kwork.ru/projects/{w['id']}/view", desc=desc,
                          category="Kwork / " + cat_names.get(str(w.get("category_id")), str(w.get("category_id"))),
                          budget=budget, for_all=True, published=published.astimezone(timezone.utc), source="kwork",
                          competitors=int(w.get("kwork_count") or 0), max_budget=max_budget,
+                         buyer_projects=num(buyer.get("wants_count")), buyer_hired=num(buyer.get("wants_hired_percent")),
                          files=[{"name": f.get("fname") or "", "url": f["url"]}
                                 for f in (w.get("files") or []) if f.get("url")] or None))
     return out

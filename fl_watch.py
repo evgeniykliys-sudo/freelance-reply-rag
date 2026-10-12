@@ -62,6 +62,19 @@ OFF_RUBRICS = {"Мобильные приложения", "Программир�
                "Генерация видео", "Генерация изображений", "Генерация музыки", "Laravel", "MODx", "1С Битрикс"}
 
 
+PRICE_MIN_SHARE = 0.7       # цена не ниже 70% бюджета заказчика (решение Евгения 12.10.2026, цель — 80–100%)
+HIRE_MIN_PCT = int(os.getenv("HIRE_MIN_PCT") or 40)          # «нанимает редко»: ниже этого процента найма…
+HIRE_MIN_PROJECTS = int(os.getenv("HIRE_MIN_PROJECTS") or 3)  # …при истории хотя бы из стольких проектов
+
+
+def rare_hirer(o: "Order") -> bool:
+    """Заказчик Kwork, который собирает предложения, но почти не нанимает (решение Евгения 12.10.2026).
+    Новых заказчиков (первый проект → «0%» без истории) не трогаем: про них просто ничего не известно."""
+    if o.buyer_projects is None or o.buyer_hired is None:
+        return False
+    return o.buyer_projects >= HIRE_MIN_PROJECTS and o.buyer_hired < HIRE_MIN_PCT
+
+
 def on_profile(o: "Order") -> bool:
     parts = [x.strip() for x in o.category.replace("Kwork / ", "").split(" / ")]
     rubric = parts[-1]
@@ -133,6 +146,8 @@ class Order:
     files: list | None = None           # вложения [{name, url}] (у Kwork — из списка, у FL.ru — со страницы)
     att: dict | None = None             # что вышло со скачиванием: {"read": [...], "skipped": [...], "error": ...}
     late: int | None = None             # через сколько минут после публикации заказ впервые попал в ленту (модерация FL)
+    buyer_projects: int | None = None   # Kwork: сколько проектов заказчик разместил на бирже
+    buyer_hired: int | None = None      # Kwork: в каком проценте из них он кого-то нанял
 
     @property
     def platform(self) -> str:
@@ -296,8 +311,11 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
    как проверишь результат). Не пиши и обратного («опыта нет», «честно скажу, не делал») — просто план.
 1а. Отклик пишешь ТЫ (Евгений) заказчику. Не обращайся к заказчику по имени Евгений и вообще не называй имён,
    если заказчик сам не подписался в тексте заказа.
-2. Цена: на {DISCOUNT}% ниже рыночной для такой задачи (или ниже цены из базы, если услуга там есть), не ниже {MIN_PRICE} ₽.
-   Если у заказа указан бюджет — предложи бюджет или немного ниже. Округляй до сотен.
+2. Цена. ЕСЛИ У ЗАКАЗА УКАЗАН БЮДЖЕТ (на Kwork — «желаемый») — цена 80–100% от него, НИКОГДА не ниже 70%; скидку
+   «ниже рынка» к такому заказу НЕ применяй: 15 000 ₽ при бюджете 70 000 ₽ выглядит как непонимание объёма, а не выгода.
+   Выше бюджета — только если объём явно больше, максимум до «допустимого» бюджета, и одной фразой объясни, за что.
+   ЕСЛИ БЮДЖЕТА НЕТ — на {DISCOUNT}% ниже рыночной для такой задачи (или ниже цены из базы, если услуга там есть).
+   В любом случае не ниже {MIN_PRICE} ₽. Округляй до сотен.
    Цена — от рынка за ОБЪЁМ работы, а не от срока: сначала оцени, сколько такой объём стоит на бирже (например,
    информационный плакат/макет — несколько тысяч за штуку, лендинг — 15–30 тыс., корпоративный сайт на 5–15 страниц
    со структурой, ТЗ дизайнеру и SEO — 60–100 тыс., сайт с каталогом и админкой — от 50 тыс.), потом ставь срок. НИКОГДА не завышай цену, чтобы оправдать длинный срок.
@@ -383,9 +401,32 @@ def draft_system(o: Order) -> str:
     return DRAFT_SYSTEM.replace("FL.ru", "Kwork") + extra
 
 
+def budget_text(o: Order) -> str:
+    """Бюджет для модели: на Kwork — желаемый и допустимый (выше желаемого можно только до допустимого)."""
+    if not o.budget:
+        return "не указан"
+    return f"{o.budget} ₽" + (f" (допустимый до {o.max_budget} ₽)" if o.max_budget and o.max_budget > o.budget else "")
+
+
+def price_vs_budget(o: "Order | None", price: int | None, soft: bool = False) -> str | None:
+    """Цена против бюджета заказчика: ниже 70% — выглядит как непонимание объёма, выше допустимого — мимо.
+    soft=True — ещё и мягкая пометка, если цена больше желаемого на 20%+ (разрешено, но стоит проверить объяснение)."""
+    if not o or not o.budget or not price:
+        return None
+    ratio = price / o.budget
+    if ratio < PRICE_MIN_SHARE:
+        return f"цена {ratio:.0%} от бюджета заказчика ({o.budget:,} ₽) — слишком дёшево".replace(",", " ")
+    top = o.max_budget if o.max_budget and o.max_budget > o.budget else o.budget
+    if price > top:
+        return f"цена выше {'допустимого' if top != o.budget else ''} бюджета заказчика ({top:,} ₽)".replace(",", " ").replace("  ", " ")
+    if soft and ratio > 1.2:
+        return f"цена {ratio:.0%} от желаемого бюджета ({o.budget:,} ₽) — проверь, что в тексте объяснено, за что больше".replace(",", " ")
+    return None
+
+
 def posting_blocks(o: Order, intro: str, with_files: bool = True) -> list[dict]:
     """Текст заказа + скачанные вложения (ТЗ, таблицы, картинки) одним сообщением для модели."""
-    posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
+    posting = f"Раздел: {o.category}\nБюджет: {budget_text(o)}\n{o.title}\n\n{o.desc}"
     blocks = attachments.to_blocks(attachments.cached(o.id))[0] if with_files else []
     head = intro + f"Текст заказа:\n{posting}"
     if blocks:
@@ -394,7 +435,7 @@ def posting_blocks(o: Order, intro: str, with_files: bool = True) -> list[dict]:
 
 
 def draft(o: Order) -> dict:
-    posting = f"Раздел: {o.category}\nБюджет: {o.budget or 'не указан'}\n{o.title}\n\n{o.desc}"
+    posting = f"Раздел: {o.category}\nБюджет: {budget_text(o)}\n{o.title}\n\n{o.desc}"
     chunks = rag.search(posting)[:6]
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
     intro = f"Фрагменты базы услуг/портфолио/шаблонов:\n\n{context}\n\n"
@@ -423,6 +464,21 @@ def draft(o: Order) -> dict:
         messages = messages + [{"role": "assistant", "content": text or "…"},
                                {"role": "user", "content": "Перепиши строго в формате: ОТКЛИК: … / ЦЕНА: … ₽ / СРОК: … дн. Без вступлений."}]
     d = parse_draft(text)
+    if price_vs_budget(o, d.get("price")):
+        # цена сильно ниже бюджета заказчика или выше допустимого — переписываем под 80–100% бюджета
+        top = o.max_budget if o.max_budget and o.max_budget > o.budget else o.budget
+        messages = messages + [{"role": "assistant", "content": text},
+                               {"role": "user", "content":
+                                f"{price_vs_budget(o, d['price'])}. Бюджет заказчика {o.budget} ₽ — поставь цену "
+                                f"{round(o.budget * 0.8, -2):.0f}–{o.budget} ₽ (выше — только если объём явно больше, "
+                                f"максимум {top} ₽, с объяснением за что). Состав работ не урезай. "
+                                "СУТЬ заново не пиши. Формат: ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
+                                              messages=messages)
+        text_p = "".join(b.text for b in r.content if b.type == "text").strip()
+        fixed = parse_draft(text_p)
+        if fixed.get("price") and fixed.get("days") and not price_vs_budget(o, fixed["price"]):
+            d, text = fixed, text_p
     cap = max_days(d.get("price"))
     if cap and d.get("days") and d["days"] > cap:
         # срок длиннее допустимого для такой цены — просим переписать целиком (этапы в тексте тоже),
@@ -558,6 +614,8 @@ def draft_problems(d: dict, o: "Order | None" = None) -> list[str]:
         probs.append("часть работ вынесена в отдельный этап/бюджет, а заказчик этапов не просил — проверь")
     if d.get("unanswered"):
         probs.append("нет ответа на просьбу заказчика: " + "; ".join(d["unanswered"]))
+    if (pb := price_vs_budget(o, d.get("price"), soft=True)):
+        probs.append(pb)
     if d.get("long_term"):
         probs.append(f"{d.get('days')} дн. за {d.get('price')} ₽ — дольше потолка, а сократить срок модель смогла только "
                      "срезав цену; проверь: возможно, цена занижена для такого объёма")
@@ -634,6 +692,9 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
         budget += " · 🔓 для всех"
     if o.competitors is not None:
         budget += f" · 👥 откликов: {o.competitors}"
+    if o.buyer_projects is not None:
+        budget += (" · 👤 новый заказчик" if o.buyer_projects <= 1 else
+                   f" · 👤 нанимает {o.buyer_hired}% (проектов {o.buyer_projects})")
     lines = [f"🆕 <b>[{o.platform}] {e(o.title)}</b>",
              f"📂 {e(o.category)} · ⏱ {age} мин назад"
              + (f" (в ленте {o.platform} появился только сейчас — видимо, был на модерации)" if o.late else ""),
@@ -728,6 +789,10 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
             continue
         if not on_profile(o):
             mark(c, o.id, f"skip: не профиль ({o.category})"); done.append((o, {"reason": "не профиль"}, None))
+            continue
+        if rare_hirer(o):
+            mark(c, o.id, f"skip: редко нанимает ({o.buyer_hired}% из {o.buyer_projects})")
+            done.append((o, {"reason": "редко нанимает"}, None))
             continue
         if o.budget and o.budget < MIN_BUDGET:                 # FL.ru: у Kwork такие отсекаются ещё в kwork_watch
             mark(c, o.id, f"skip: бюджет {o.budget} < {MIN_BUDGET}"); done.append((o, {"reason": "дешевле минималки"}, None))
