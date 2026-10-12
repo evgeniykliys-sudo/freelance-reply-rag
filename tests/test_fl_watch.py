@@ -77,8 +77,8 @@ _, _, d3, _, ver3 = fw.load_draft(c, o.id)
 check("правка: новая версия, старое сообщение тоже ведёт к заказу",
       ver3 == 2 and d3["price"] == 3000 and fw.order_by_msg(c, 111) == o.id and fw.order_by_msg(c, 222) == o.id)
 k = fw.keyboard(o.id, o.link)
-check("кнопки: Править, Утвердить, Открыть заказ",
-      [b["text"] for row in k["inline_keyboard"] for b in row] == ["✏️ Править", "✅ Утвердить", "Открыть заказ на FL.ru"])
+check("кнопки: Править, Утвердить и отправить, Открыть заказ",
+      [b["text"] for row in k["inline_keyboard"] for b in row] == ["✏️ Править", "🚀 Утвердить и отправить", "Открыть заказ на FL.ru"])
 check("после утверждения — только «Открыть заказ»", len(fw.keyboard(o.id, o.link, "approved")["inline_keyboard"]) == 1)
 check("callback_data укладывается в лимит Telegram (64 байта)",
       all(len(b.get("callback_data", "").encode()) <= 64 for row in k["inline_keyboard"] for b in row))
