@@ -627,7 +627,7 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
     reply = d["reply"]
     while True:
         cut = len(reply) < len(d["reply"])
-        body = e(reply) + ("…\n[полный текст — в форме отклика после «Утвердить»]" if cut else "")
+        body = e(reply) + ("…\n[полный текст уйдёт в отклике целиком]" if cut else "")
         msg = "\n".join(lines + ["", head + " (нажми, чтобы скопировать):", f"<code>{body}</code>"] + tail)
         if len(msg) <= 4000 or not reply:
             return msg
@@ -638,7 +638,7 @@ def keyboard(order_id: str, url: str, status: str = "new") -> dict:
     rows = [[{"text": "Открыть заказ на " + ("Kwork" if "kwork.ru" in url else "FL.ru"), "url": url}]]
     if status != "approved":
         rows.insert(0, [{"text": "✏️ Править", "callback_data": f"edit:{order_id}"},
-                        {"text": "✅ Утвердить", "callback_data": f"ok:{order_id}"}])
+                        {"text": "🚀 Утвердить и отправить", "callback_data": f"ok:{order_id}"}])
     return {"inline_keyboard": rows}
 
 

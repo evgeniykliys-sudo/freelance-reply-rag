@@ -1,13 +1,17 @@
-"""Предложение на заказ биржи Kwork через ваш Chrome (тот же, что для FL.ru): заполнить → скриншот → отправить.
+"""Предложение на заказ биржи Kwork через ваш Chrome (тот же, что для FL.ru): заполнить форму → отправить.
 
 Форма — kwork.ru/new_offer?project=ID: описание (150–2000 символов), стоимость (Kwork задаёт минимум для заказа),
-порядок оплаты и срок из списка. Отправка — только по кнопке в Telegram.
+порядок оплаты и срок из списка. Отправка — только по кнопке в Telegram («Утвердить и отправить»);
+предпросмотра нет (prepare() со скриншотом остался для ручных проверок).
 """
+import logging
 import re
 
 from playwright.async_api import async_playwright
 
 from fl_submit import CDP, SHOTS, NotReady
+
+log = logging.getLogger("kwork_submit")
 
 TERMS = {"недел": 7, "месяц": 30}
 
@@ -126,27 +130,59 @@ async def prepare(link: str, text: str, price: int, days: int, title: str, order
             await browser.close()       # для CDP это отключение, а не закрытие браузера
 
 
+async def _offer_sent(page, link: str) -> bool:
+    """Отправилось — на странице заказа больше нет «Предложить услугу» (или есть «Ваше предложение»)."""
+    await page.goto(link, wait_until="domcontentloaded")
+    await page.wait_for_timeout(2500)
+    t = await page.evaluate("() => document.body.innerText")
+    return "Предложить услугу" not in t or "Ваше предложение" in t
+
+
+async def offer_exists(link: str) -> bool | None:
+    """Есть ли наше предложение на заказе — со своим подключением к Chrome (отправка зависла / бот перезапускался)."""
+    try:
+        async with async_playwright() as p:
+            browser, page = await _page(p)
+            try:
+                page.set_default_timeout(25000)
+                return await _offer_sent(page, link)
+            finally:
+                await page.close()
+                await browser.close()
+    except Exception:
+        log.warning("проверка предложения Kwork не удалась", exc_info=True)
+        return None
+
+
 async def submit(link: str, text: str, price: int, days: int, title: str) -> dict:
-    """Заполняет заново и отправляет. Проверяет, что форма для этого заказа больше не открывается."""
+    """Заполняет форму и сразу отправляет (предпросмотра нет). Если Kwork подсветил контакты/стоп-слова — не отправляет.
+    Каждый шаг пишется в лог: если отправка зависнет, видно, на каком месте."""
+    if len(text) < 150:
+        raise NotReady(f"Kwork требует от 150 символов, в черновике {len(text)} — допиши через «Править».")
     async with async_playwright() as p:
         browser, page = await _page(p)
         try:
+            page.set_default_timeout(25000)                # любое ожидание — не дольше 25 с, а не «вечно»
+            pid = project_id(link)
+            log.info("отправка Kwork %s: открываю форму", pid)
             st = await _open(page, link)
             price = fit_price(price, st)
-            await _fill(page, text[:2000], price, days, title)
+            log.info("отправка Kwork %s: заполняю форму", pid)
+            filled = await _fill(page, text[:2000], price, days, title)
+            if filled.get("stopwords"):
+                raise NotReady("Kwork подсветил в тексте контакты/стоп-слова и не пропустит предложение — "
+                               "поправь текст через «Править» и утверди ещё раз.")
+            log.info("отправка Kwork %s: нажимаю «Предложить»", pid)
             await page.locator("button:visible, .kw-button:visible").filter(has_text="Предложить").last.click()
-            await page.wait_for_timeout(5000)
-            t = await page.evaluate("() => document.body.innerText")
+            await page.wait_for_timeout(4000)
             errors = await page.evaluate("""() => [...document.querySelectorAll('.error, [class*=error]')]
                 .filter(e => e.offsetParent && e.innerText.trim()).map(e => e.innerText.trim().slice(0, 150))""")
             if "new_offer" in page.url and errors:
                 raise NotReady("Kwork не принял предложение: " + "; ".join(errors[:3]))
-            # отправилось — повторно форма уже не открывается
-            await page.goto(link, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2500)
-            t = await page.evaluate("() => document.body.innerText")
-            ok = "Предложить услугу" not in t or "Ваше предложение" in t
-            return {"ok": ok, "price": price, "url": page.url}
+            log.info("отправка Kwork %s: проверяю, что предложение появилось", pid)
+            ok = await _offer_sent(page, link)
+            log.info("отправка Kwork %s: готово, ok=%s", pid, ok)
+            return {"ok": ok, "price": price, "url": page.url, "term": filled["term"], "competitors": st["competitors"]}
         finally:
             await page.close()
             await browser.close()
