@@ -320,7 +320,9 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
 4. Без контактов, мессенджеров, предоплаты вне FL.ru и БЕЗ ССЫЛОК (никаких github, сайтов, URL) — FL.ru их не любит.
    Примеры работ прикрепляются к отклику отдельно (строка РАБОТЫ), в тексте можно написать «прикрепил похожие работы».
 5. Стиль: живо и по делу, без канцелярита. 4–7 предложений: приветствие по сути задачи → подтверждение (проект или
-   план работы) → срок и цена → один уточняющий вопрос, самый важный для оценки.
+   план работы) → срок и цена. БЕЗ вопросов заказчику — ни в конце, ни в середине (решение Евгения). Если чего-то не
+   хватает для оценки — назови своё допущение («считаю на 5 экранов; если больше — +N ₽») и закончи ценой и сроком
+   или фразой о готовности начать.
    Не пересказывай заказчику свои правила («без деления на этапы с доплатой», «за 1–2 дня такое не сделать»,
    «цена за весь комплект») — пиши только суть: что сделаешь, к какому сроку, за сколько.
    Инструменты называй подходящие задаче: печать/полиграфия → векторный PDF под печать (CMYK, вылеты), Illustrator
@@ -542,13 +544,25 @@ def draft_problems(d: dict, o: "Order | None" = None) -> list[str]:
     return probs
 
 
+def drop_final_questions(reply: str) -> str:
+    """Вопросы заказчику в конце отклика не нужны (решение Евгения): если модель всё же закончила вопросом —
+    отрезаем завершающие предложения с «?», пока отклик не кончится утверждением (но не короче 150 символов)."""
+    out = reply.rstrip()
+    while out.endswith("?"):
+        cut = max(out.rfind(". ", 0, len(out) - 1), out.rfind("! ", 0, len(out) - 1), out.rfind("\n", 0, len(out) - 1))
+        if cut < 0 or cut < 150:
+            break
+        out = out[:cut + 1].rstrip()
+    return out
+
+
 def parse_draft(text: str) -> dict:
     reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
     price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
     days = re.search(r"СРОК:\s*(\d+)", text)
     works = re.search(r"РАБОТЫ:\s*([^\n]*)", text)
     nums = [int(x) for x in re.findall(r"\d+", works.group(1))] if works else []
-    return {"reply": (reply.group(1) if reply else text).strip(),
+    return {"reply": drop_final_questions((reply.group(1) if reply else text).strip()),
             "price": int(price.group(1).replace(" ", "")) if price else None,
             "days": int(days.group(1)) if days else None,
             "works": fl_submit.works_from_numbers(nums)}
