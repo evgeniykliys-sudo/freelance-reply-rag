@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 from datetime import datetime
@@ -32,7 +33,8 @@ HELP_TEXT = (
     "Слежу за новыми заказами FL.ru (IT, сайты, дизайн, боты, AI) и присылаю их сюда с готовым черновиком "
     "отклика и ценой.\n\n"
     "Под карточкой: «✏️ Править» — напиши пожелание (или просто ответь на карточку), перепишу черновик; "
-    "«✅ Утвердить» — зафиксирую итоговый текст.\n\n"
+    "«🚀 Утвердить и отправить» — сразу отправлю отклик на бирже (без предпросмотра) и пришлю итог: "
+    "ушёл или нет, сколько откликов осталось.\n\n"
     "Сообщения от заказчиков Kwork и FL.ru тоже присылаю сюда с черновиком ответа: «🚀 Отправить», «✏️ Править», "
     "«✍️ Свой текст» (отправлю твой текст как есть) или «Без ответа». Без кнопки заказчику ничего не уходит.\n\n"
     "Можно и вручную: пришли текст любого заказа — предложу черновик отклика по базе услуг.\n\n"
@@ -106,118 +108,145 @@ def send_kb(order_id: str, url: str, left) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"Открыть заказ на {site}", url=url)]])
 
 
-@dp.callback_query(F.data.startswith("ok:"))
-async def on_approve(cb: CallbackQuery):
-    """Утвердить: заполняем форму отклика в Chrome (без отправки) и показываем скриншот."""
-    order_id = cb.data.split(":", 1)[1]
-    c = fl_watch.db()
-    got = fl_watch.load_draft(c, order_id)
-    if not got:
-        await ack(cb, "Не нашёл этот заказ", show_alert=True)
-        return
-    o, tri, d, _, ver = got
-    if not d.get("price") or not d.get("days"):
-        await ack(cb, "В черновике нет цены или срока — поправь через «Править»", show_alert=True)
-        return
+SEND_TIMEOUT = int(os.getenv("SEND_TIMEOUT_SEC") or 150)     # дольше — считаем, что отправка зависла, и сверяемся с биржей
+
+
+def money(v: int) -> str:
+    return f"{v:,}".replace(",", " ")
+
+
+async def confirm_sent(o) -> bool | None:
+    """Независимая проверка по бирже: есть ли наш отклик/предложение на этом заказе. None — проверить не вышло."""
     if o.source == "kwork":
-        await approve_kwork(cb, c, o, d, order_id)
-        return
-    await ack(cb, "Заполняю форму отклика…")
-    wait = await cb.message.answer("⏳ Открываю заказ в Chrome и заполняю форму (не отправляю)…")
-    try:
-        st = await fl_submit.prepare(o.link, d["reply"], d["price"], d["days"], d.get("works", []), order_id)
-    except fl_submit.NotReady as e:
-        await wait.edit_text(f"⚠️ {e}")
-        return
-    except Exception:
-        logging.exception("prepare")
-        await wait.edit_text("⚠️ Не получилось заполнить форму — открой заказ и откликнись вручную.")
-        return
-    c.execute("update drafts set status='approved' where order_id=?", (order_id,))
-    c.commit()
-    comp = f"конкурентов: {st['competitors']}"
-    if st.get("prices"):
-        comp += f", цены {st['prices'][0]:,}–{st['prices'][1]:,} ₽".replace(",", " ")
-    if st.get("terms"):
-        comp += f", сроки {st['terms'][0]}–{st['terms'][1]} дн."
-    caption = (f"Форма заполнена, <b>ещё не отправлено</b>.\n💰 {d['price']:,} ₽ · {d['days']} дн.".replace(",", " ")
-               + f"\n👥 {comp}" + (f"\n🎟 откликов осталось: {st['left']}" if st.get("left") is not None else "")
-               + f"\n📎 работ прикреплено: {len(st['works'])}")
-    await wait.delete()
-    await cb.message.answer_photo(FSInputFile(st["shot"]), caption=caption, parse_mode="HTML",
-                                  reply_markup=send_kb(order_id, o.link, st.get("left")))
+        return await kwork_submit.offer_exists(o.link)
+    return await fl_submit.offer_exists(o.id)
 
 
-async def approve_kwork(cb: CallbackQuery, c, o, d, order_id: str):
-    await ack(cb, "Заполняю форму предложения…")
-    wait = await cb.message.answer("⏳ Открываю заказ на Kwork в Chrome и заполняю форму (не отправляю)…")
-    try:
-        st = await kwork_submit.prepare(o.link, d["reply"], d["price"], d["days"], o.title, order_id)
-    except fl_submit.NotReady as e:
-        await wait.edit_text(f"⚠️ {e}")
-        return
-    except Exception:
-        logging.exception("kwork prepare")
-        await wait.edit_text("⚠️ Не получилось заполнить форму — открой заказ и предложи услугу вручную.")
-        return
-    c.execute("update drafts set status='approved' where order_id=?", (order_id,))
-    c.commit()
-    price = f"{st['price']:,}".replace(",", " ")
-    note = f" (поднял до минимума Kwork, в черновике {d['price']})" if st["price"] != d["price"] else ""
-    net = f"{round(st['price'] * 0.8):,}".replace(",", " ")     # Kwork берёт 20% — в «Моих откликах» видна эта сумма
-    caption = (f"Форма заполнена, <b>ещё не отправлено</b>.\n💰 заказчик платит {price} ₽{note}, тебе {net} ₽ "
-               f"(−20% Kwork) · {st['term']}"
-               f"\n👥 предложений уже: {st['competitors']}"
-               + ("\n⚠️ Kwork подсветил контакты/стоп-слова в тексте — поправь" if st.get("stopwords") else ""))
-    await wait.delete()
-    await cb.message.answer_photo(FSInputFile(st["shot"]), caption=caption, parse_mode="HTML",
-                                  reply_markup=send_kb(order_id, o.link, None))
+def sent_text(o, d, res: dict) -> str:
+    """Итоговое сообщение об успешной отправке."""
+    if o.source == "kwork":
+        price = res.get("price") or d["price"]
+        note = f" (поднял до минимума Kwork, в черновике {money(d['price'])})" if price != d["price"] else ""
+        lines = [f"✅ <b>Предложение отправлено на Kwork</b>: «{html.escape(o.title)}»",
+                 f"💰 заказчик платит {money(price)} ₽{note}, тебе {money(round(price * 0.8))} ₽ (−20% Kwork)"
+                 + (f" · {res['term']}" if res.get("term") else "")]
+        if res.get("competitors"):
+            lines.append(f"👥 предложений уже: {res['competitors']}")
+        return "\n".join(lines)
+    lines = [f"✅ <b>Отклик отправлен на FL.ru</b>: «{html.escape(o.title)}»",
+             f"💰 {money(d['price'])} ₽ · {d['days']} дн."]
+    if d.get("works"):
+        lines.append(f"📎 работ прикреплено: {len(d['works'])}")
+    if res.get("competitors"):
+        lines.append(f"👥 откликов уже: {res['competitors']}")
+    if res.get("left") is not None:
+        lines.append(f"🎟 откликов осталось: {res['left']}")
+    if res.get("already"):
+        lines.append("ℹ️ Отклик на этот заказ уже был — второй не отправлял.")
+    return "\n".join(lines)
 
 
-@dp.callback_query(F.data.startswith("send:"))
-async def on_send(cb: CallbackQuery):
-    order_id = cb.data.split(":", 1)[1]
+async def send_now(cb: CallbackQuery, order_id: str):
+    """«Утвердить и отправить»: сразу заполняем форму и отправляем, без предпросмотра. Итоговое сообщение приходит
+    всегда — успех, отказ биржи или «не дождался» (тогда сверяемся с самой биржей, ушёл ли отклик)."""
     c = fl_watch.db()
     got = fl_watch.load_draft(c, order_id)
     if not got:
         await ack(cb, "Не нашёл этот заказ", show_alert=True)
         return
     o, tri, d, status, _ = got
+    if not d.get("price") or not d.get("days"):
+        await ack(cb, "В черновике нет цены или срока — поправь через «Править»", show_alert=True)
+        return
     if status in ("sending", "sent_fl", "sent_kw"):
         await ack(cb, "Уже отправлено или отправляется", show_alert=True)
         return
+    kw = o.source == "kwork"
+    site = "Kwork" if kw else "FL.ru"
     c.execute("update drafts set status='sending' where order_id=?", (order_id,))
     c.commit()
-    await ack(cb, "Отправляю…")
-    await cb.message.edit_reply_markup(reply_markup=None)
-    kw = o.source == "kwork"
+    await ack(cb, f"Отправляю на {site}…")
     try:
-        if kw:
-            res = await kwork_submit.submit(o.link, d["reply"], d["price"], d["days"], o.title)
-        else:
-            res = await fl_submit.submit(o.link, d["reply"], d["price"], d["days"], d.get("works", []), o.id)
-    except Exception as e:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    wait = await cb.message.answer(f"⏳ Отправляю на {site}…")
+
+    res, problem = None, None
+    try:
+        coro = (kwork_submit.submit(o.link, d["reply"], d["price"], d["days"], o.title) if kw else
+                fl_submit.submit(o.link, d["reply"], d["price"], d["days"], d.get("works", []), o.id))
+        res = await asyncio.wait_for(coro, SEND_TIMEOUT)
+    except asyncio.TimeoutError:
+        problem = f"не дождался ответа от {site} за {SEND_TIMEOUT} с"
+        logging.error("отправка %s зависла дольше %s с", order_id, SEND_TIMEOUT)
+    except fl_submit.NotReady as e:
+        problem = str(e)
+    except Exception:
         logging.exception("submit")
-        c.execute("update drafts set status='approved' where order_id=?", (order_id,))
+        problem = "ошибка при отправке"
+
+    ok = bool(res and res.get("ok"))
+    if not ok:
+        # результат неясен или отказ — смотрим на самой бирже: вдруг отклик всё же ушёл (так было при зависании)
+        if await confirm_sent(o):
+            ok, res = True, {**(res or {}), "already": bool(problem and "уже" in problem)}
+            if kw:
+                res.setdefault("price", d["price"])
+
+    if ok:
+        c.execute("update drafts set status=? where order_id=?", ("sent_kw" if kw else "sent_fl", order_id))
         c.commit()
-        msg = str(e) if isinstance(e, fl_submit.NotReady) else "ошибка при отправке"
-        await cb.message.answer(f"⚠️ Отклик не отправлен: {msg}. Проверь заказ вручную.",
-                                reply_markup=send_kb(order_id, o.link, None))
-        return
-    c.execute("update drafts set status=? where order_id=?",
-              (("sent_kw" if kw else "sent_fl") if res["ok"] else "approved", order_id))
-    c.commit()
-    if res["ok"] and kw:
-        await cb.message.answer("✅ Предложение отправлено заказчику на Kwork (видно в «Биржа → Мои предложения»).")
-    elif res["ok"]:
-        await cb.message.answer(f"✅ Отклик отправлен заказчику и виден в «Мои отклики»."
-                                + (f"\n🎟 откликов осталось: {res['left']}" if res.get("left") is not None else ""))
+        text = sent_text(o, d, res)
     else:
-        await cb.message.answer("❓ Кнопку нажал, но не убедился, что отклик ушёл. Открой заказ и проверь вручную, "
-                                "прежде чем отправлять ещё раз.",
-                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [InlineKeyboardButton(text="Открыть заказ на " + ("Kwork" if kw else "FL.ru"),
-                                                          url=o.link)]]))
+        c.execute("update drafts set status='new' where order_id=?", (order_id,))
+        c.commit()
+        text = (f"⚠️ <b>Отклик не отправлен</b>: {html.escape(problem or f'не вижу его на {site}')}.\n"
+                + ("Открой заказ и проверь вручную, прежде чем отправлять ещё раз." if not problem or "дождался" in problem
+                   else "Поправь и нажми «Утвердить и отправить» ещё раз."))
+    markup = (InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"Открыть заказ на {site}", url=o.link)]])
+              if ok or not problem or "дождался" in problem else InlineKeyboardMarkup.model_validate(fl_watch.keyboard(order_id, o.link)))
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    await cb.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@dp.callback_query(F.data.startswith("ok:"))
+async def on_approve(cb: CallbackQuery):
+    """Утвердить и отправить сразу (предпросмотр убран)."""
+    await send_now(cb, cb.data.split(":", 1)[1])
+
+
+@dp.callback_query(F.data.startswith("send:"))
+async def on_send(cb: CallbackQuery):
+    """Кнопка «Отправить» на старых карточках с предпросмотром — работает так же."""
+    await send_now(cb, cb.data.split(":", 1)[1])
+
+
+async def reconcile_sending(bot_: Bot):
+    """После перезапуска/зависания в базе могли остаться заказы «отправляется». Сверяем их с биржей и сообщаем итог."""
+    c = fl_watch.db()
+    stuck = c.execute("select order_id from drafts where status='sending'").fetchall()
+    for (oid,) in stuck:
+        got = fl_watch.load_draft(c, oid)
+        if not got:
+            continue
+        o = got[0]
+        exists = await confirm_sent(o)
+        if exists is None:
+            continue                                         # биржа/Chrome недоступны — проверим при следующем запуске
+        c.execute("update drafts set status=? where order_id=?",
+                  (("sent_kw" if o.source == "kwork" else "sent_fl") if exists else "new", oid))
+        c.commit()
+        site = "Kwork" if o.source == "kwork" else "FL.ru"
+        await bot_.send_message(ADMIN_ID, (f"✅ Отправка на {site} прервалась на «{html.escape(o.title)}», но отклик на бирже "
+                                           "есть — отметил как отправленный." if exists else
+                                           f"ℹ️ Отправка на {site} прервалась на «{html.escape(o.title)}», отклика на бирже нет "
+                                           "— можно утвердить заново."), parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                                    text=f"Открыть заказ на {site}", url=o.link)]]))
 
 
 @dp.callback_query(F.data.startswith("cancel:"))
@@ -304,6 +333,7 @@ async def main():
                 return
             logging.warning("Telegram пока недоступен (%s) — повтор через 30 с", e)
             await asyncio.sleep(30)
+    asyncio.create_task(reconcile_sending(bot))          # зависшие «отправляется» после прошлого запуска
     watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
     inbox = asyncio.create_task(inbox_watch.watch_forever(bot, ADMIN_ID))
     night = asyncio.create_task(stop_at_night())

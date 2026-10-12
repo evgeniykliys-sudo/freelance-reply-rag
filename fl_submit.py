@@ -1,7 +1,8 @@
-"""Отклик на заказ FL.ru через ваш Chrome (в нём вы залогинены): заполнить → показать скриншот → отправить.
+"""Отклик на заказ FL.ru через ваш Chrome (в нём вы залогинены): заполнить форму → отправить.
 
 Chrome должен быть запущен с портом отладки (start_chrome_fl.bat). API для откликов у FL.ru нет, поэтому
-заполняем форму на странице заказа, как человек. Каждый отклик платный — отправка только по кнопке в Telegram.
+заполняем форму на странице заказа, как человек. Каждый отклик платный — отправка только по кнопке в Telegram
+(«Утвердить и отправить»); предпросмотра нет (prepare() с скриншотом остался для ручных проверок).
 """
 import json
 import logging
@@ -126,28 +127,73 @@ async def prepare(link: str, text: str, price: int, days: int, works: list[int],
             await browser.close()       # для CDP это отключение, а не закрытие браузера
 
 
+XHR = {"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"}
+
+
+async def offer_exists_ctx(ctx, project_id: str) -> bool | None:
+    """Есть ли наш отклик на заказ — по JSON-списку откликов FL.ru (не зависит от вёрстки страницы «Мои отклики»).
+    True/False; None — проверить не вышло (FL.ru недоступен, сессия слетела)."""
+    try:
+        for dialogues in (0, 1):               # отклики без переписки и с перепиской — в разных списках
+            r = await ctx.request.get(f"https://www.fl.ru/projects/offers/?limit=50&dialogues={dialogues}"
+                                      "&deleted=0&sort=lastMessage&offset=0", headers=XHR, timeout=30000)
+            if any(str(i.get("project_id")) == str(project_id) for i in (await r.json())["items"]):
+                return True
+        return False
+    except Exception:
+        log.warning("проверка откликов FL.ru не удалась", exc_info=True)
+        return None
+
+
+async def offer_exists(project_id: str) -> bool | None:
+    """То же, но с собственным подключением к Chrome (когда отправка зависла или бот перезапускался)."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(CDP, timeout=8000)
+            try:
+                return await offer_exists_ctx(browser.contexts[0], project_id)
+            finally:
+                await browser.close()
+    except Exception:
+        log.warning("не подключиться к Chrome для проверки отклика", exc_info=True)
+        return None
+
+
 async def submit(link: str, text: str, price: int, days: int, works: list[int], project_id: str) -> dict:
-    """Заполняет заново (страница могла обновиться) и отправляет. Проверяет по «Мои отклики», что отклик появился."""
+    """Заполняет форму и сразу отправляет (предпросмотра нет). Успех подтверждает по списку откликов FL.ru.
+    Каждый шаг пишется в лог: если отправка снова зависнет, видно, на каком месте."""
     async with async_playwright() as p:
         browser, page = await _page(p)
         try:
+            page.set_default_timeout(25000)                # любое ожидание — не дольше 25 с, а не «вечно»
+            log.info("отправка %s: открываю заказ", project_id)
             await page.goto(link, wait_until="domcontentloaded")
             await page.wait_for_timeout(2500)
             st = await _read_state(page)
+            if not st["logged_in"]:
+                raise NotReady("В Chrome не выполнен вход в FL.ru — войдите и нажмите «Утвердить» ещё раз.")
             if not st["has_form"]:
-                raise NotReady("Форма отклика пропала — возможно, вы уже откликнулись на этот заказ.")
+                if await offer_exists_ctx(page.context, project_id):
+                    return {"ok": True, "left": st["left"], "competitors": st["competitors"], "already": True}
+                raise NotReady("На этот заказ откликнуться нельзя (заказ закрыт, только для PRO или лимит откликов).")
+            log.info("отправка %s: заполняю форму", project_id)
             await _fill(page, text, price, days, works)
+            log.info("отправка %s: нажимаю «Отправить отклик»", project_id)
             await page.get_by_role("button", name="Отправить отклик").click()
-            await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(4000)
             err = await page.evaluate("""() => [...document.querySelectorAll('[id$=-error-text]')]
                 .map(e => e.innerText.trim()).filter(Boolean)""")
             if err:
                 raise NotReady("FL.ru не принял отклик: " + "; ".join(err))
-            after = await _read_state(page)
-            await page.goto("https://www.fl.ru/projects/my-offers/", wait_until="domcontentloaded")
-            await page.wait_for_timeout(2500)
-            mine = await page.evaluate("() => document.body.innerHTML")
-            return {"ok": f"/projects/{project_id}/" in mine, "left": after["left"]}
+            log.info("отправка %s: проверяю, что отклик появился", project_id)
+            ok = await offer_exists_ctx(page.context, project_id)
+            if ok is None:                                  # JSON недоступен — запасной путь через страницу «Мои отклики»
+                await page.goto("https://www.fl.ru/projects/my-offers/", wait_until="domcontentloaded")
+                await page.wait_for_timeout(2500)
+                ok = f"/projects/{project_id}/" in await page.evaluate("() => document.body.innerHTML")
+            after = await _read_state(page) if "my-offers" not in page.url else st
+            log.info("отправка %s: готово, ok=%s", project_id, ok)
+            return {"ok": bool(ok), "left": after["left"], "competitors": st["competitors"]}
         finally:
             await page.close()
             await browser.close()
