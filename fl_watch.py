@@ -31,6 +31,9 @@ import attachments
 import fl_submit
 import rag
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")      # до констант ниже — они читают .env при загрузке
+
 log = logging.getLogger("fl_watch")
 DB = Path(__file__).parent / "fl_seen.db"
 UA = "Mozilla/5.0 (fl-watch; personal order notifier)"
@@ -40,7 +43,7 @@ CATEGORIES = {2: "Сайты", 3: "Дизайн", 5: "Программирова
               37: "Браузеры", 40: "Интернет-магазины", 41: "Автоматизация бизнеса", 42: "Фирменный стиль"}
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-5-5"
 # проектирование и узкие специальности — не берём (решение Евгения): по рубрике и по словам в заказе, без нейросети
-NARROW_RUBRICS = {"Архитектура", "Интерьеры", "Ландшафтный дизайн", "Промышленный дизайн", "Инжиниринг"}
+NARROW_RUBRICS = {"Архитектура", "Интерьеры", "Интерьер и экстерьер", "Ландшафтный дизайн", "Промышленный дизайн", "Инжиниринг"}
 NARROW_WORDS = (r"\bПСД\b|\bПД\b|\bРД\b|проектн\w* документац|рабоч\w* документац|\bраздел\w* (АР|КР|ОВ|ВК|ЭОМ|ГП|ПОС)\b|"
                 r"\b(АР|КР|ОВиК|ЭОМ)\b|чертеж|чертёж|AutoCAD|Автокад|Revit|ArchiCAD|Renga|nanoCAD|SolidWorks|Компас-?3D|"
                 r"конструкторск\w* документац|архитектурн\w* проект|проектирован\w* (здани|дом|сетей|инженерн|вентиляц|отоплен|электросна)")
@@ -75,10 +78,14 @@ def rare_hirer(o: "Order") -> bool:
     return o.buyer_projects >= HIRE_MIN_PROJECTS and o.buyer_hired < HIRE_MIN_PCT
 
 
+# графика на Kwork (раздел «Дизайн») — в профиле с 14.10.2026, решение Евгения: отзывы набирать и на дизайне
+KWORK_DESIGN = (os.getenv("KWORK_DESIGN") or "1") != "0"
+
+
 def on_profile(o: "Order") -> bool:
     parts = [x.strip() for x in o.category.replace("Kwork / ", "").split(" / ")]
     rubric = parts[-1]
-    if rubric in WEB_DESIGN:
+    if rubric in WEB_DESIGN or (KWORK_DESIGN and o.source == "kwork" and parts[0] == "Дизайн"):
         return True
     return rubric not in OFF_RUBRICS and not (set(parts[:-1]) & OFF_PARENTS) and parts[0] not in OFF_PARENTS
 # Haiku 5.5 по умолчанию «думает» перед ответом — для коротких JSON-ответов это лишние токены и обрезанный ответ
@@ -280,7 +287,10 @@ take=false ТОЛЬКО если: не IT (офлайн, выезд, звонк�
 risk — ТОЛЬКО подозрение на нечестную схему (накрутки, обман людей, мошенничество). Бюджет, объём, сложность, тема,
 юридические тонкости — это НЕ risk, оставь пусто. У обычного заказа risk пустой.
 Отсутствие бюджета, ТЗ во вложении, незнакомая технология — НЕ причина отказа (take=true, укажи learn).
-big=true — проект явно крупный для одного человека (больше ~2 недель работы)."""
+big=true — проект явно крупный для одного человека (больше ~2 недель работы).""" + ("""
+Исключение из «не профиль»: заказ из раздела «Kwork / Дизайн» — графика В ПРОФИЛЕ (логотипы, баннеры, полиграфия,
+оформление маркетплейсов и соцсетей, презентации, иллюстрации, обработка фото, ИИ-генерация изображений): делается
+в Figma/Canva и нейросетях — take=true. Кроме интерьеров, 3D-моделирования и промышленного дизайна.""" if KWORK_DESIGN else "")
 
 
 def triage(client: Anthropic, o: Order) -> dict:
