@@ -287,16 +287,20 @@ check("профиль: боты, сайты, дизайн сайта, данны
                                     "Kwork / Дизайн / Полиграфия"]))
 
 kb0 = dataclasses.replace(k0, budget=70000, max_budget=200000)
-check("цена 21% от бюджета — «слишком дёшево»; 80–100% и до допустимого — ок; выше допустимого — пометка",
-      "дёшево" in fw.price_vs_budget(kb0, 15000) and fw.price_vs_budget(kb0, 60000) is None
-      and fw.price_vs_budget(kb0, 150000) is None and "выше" in fw.price_vs_budget(kb0, 250000)
+check("цена 60–65% бюджета — ок; 21% и 80% — пометка; без бюджета — без проверки",
+      "ниже" in fw.price_vs_budget(kb0, 15000) and fw.price_vs_budget(kb0, 42000) is None
+      and fw.price_vs_budget(kb0, 45500) is None and "выше" in fw.price_vs_budget(kb0, 56000)
       and fw.price_vs_budget(dataclasses.replace(k0, budget=None), 3000) is None)
-check("цена втрое выше желаемого (в пределах допустимого) — мягкая пометка только в карточке",
-      fw.price_vs_budget(dataclasses.replace(k0, budget=15000, max_budget=45000), 45000) is None
-      and "проверь" in fw.price_vs_budget(dataclasses.replace(k0, budget=15000, max_budget=45000), 45000, soft=True))
+check("маленький бюджет: 65% меньше минималки — цена = минималка, но не больше бюджета",
+      fw.price_range(dataclasses.replace(k0, budget=1200)) == (min(fw.MIN_PRICE, 1200),) * 2
+      and fw.price_range(dataclasses.replace(k0, budget=10000)) == (max(6000, fw.MIN_PRICE), max(6500, fw.MIN_PRICE)))
+_hire = fw.HIRE_MIN_PCT
+check("фильтр «редко нанимает» по умолчанию выключен", _hire == 0 and not fw.rare_hirer(dataclasses.replace(k0, buyer_projects=43, buyer_hired=0)))
+fw.HIRE_MIN_PCT = 40
 rh = lambda n, p: fw.rare_hirer(dataclasses.replace(k0, buyer_projects=n, buyer_hired=p))  # noqa: E731
-check("редко нанимает: 0% из 7, 27% из 43 — пропуск; новый (1 проект, 0%), 83% из 9, 40% из 9 — берём",
+check("редко нанимает (если включить HIRE_MIN_PCT=40): 0% из 7, 27% из 43 — пропуск; новый (1 проект, 0%), 83% из 9, 40% из 9 — берём",
       rh(7, 0) and rh(43, 27) and not rh(1, 0) and not rh(9, 83) and not rh(9, 40) and not rh(None, None))
+fw.HIRE_MIN_PCT = _hire
 check("в карточке — сколько нанимает заказчик / «новый заказчик»",
       "нанимает 83% (проектов 9)" in fw.card(dataclasses.replace(k0, buyer_projects=9, buyer_hired=83), {}, good)
       and "новый заказчик" in fw.card(dataclasses.replace(k0, buyer_projects=1, buyer_hired=0), {}, good))
