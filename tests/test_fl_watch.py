@@ -2,6 +2,7 @@
 
     python tests/test_fl_watch.py
 """
+import os
 import sys
 from pathlib import Path
 
@@ -109,8 +110,15 @@ LOGO = KW.replace('"wants":[', '"wants":[{"id":1,"name":"Нарисовать л
                   '"date_create":"2026-10-07 12:36:34"},{"id":2,"name":"Баннер","description":"x","priceLimit":"1000",'
                   '"category_id":"25","date_create":"2026-10-07 12:36:34"},{"id":3,"name":"Перевести картинку в вектор SVG",'
                   '"description":"x","priceLimit":"1000","category_id":"68","date_create":"2026-10-07 12:36:34"},')
-check("Kwork: логотипы и вектор отсеяны, сайт с «логотип» в описании остался",
+_design = (kw.DESIGN, kw.SKIP_CATEGORIES)
+kw.DESIGN, kw.SKIP_CATEGORIES = False, {"25"}                       # раздел «Дизайн» выключен (KWORK_DESIGN=0)
+check("Kwork без «Дизайна»: логотипы и вектор отсеяны, сайт с «логотип» в описании остался",
       [o.id for o in kw.parse_page(LOGO.replace("Нужен сайт.", "Нужен сайт, логотип есть."), {})] == ["kw3264640"])
+kw.DESIGN, kw.SKIP_CATEGORIES = True, set()
+check("Kwork с «Дизайном»: логотип, баннер и вектор из раздела «Дизайн» остались",
+      len(kw.parse_page(LOGO, {"25": "Дизайн / Логотип и брендинг", "28": "Дизайн / Арт и иллюстрации",
+                               "68": "Дизайн / Обработка и редактирование"})) == 4)
+kw.DESIGN, kw.SKIP_CATEGORIES = _design
 import kwork_submit as ks  # noqa: E402
 
 TERMS = ["1 день", "2 дня", "5 дней", "7 дней", "10 дней", "2 недели", "3 недели", "1 месяц", "2 месяца"]
@@ -144,8 +152,16 @@ check("Excel: общие строки и числа", "Позиция | Кол-�
 bl, rd, sk = at.to_blocks(sorted(tmp.iterdir()))
 check("в блоки попали Word и Excel, rar пропущен с причиной",
       sorted(rd) == ["ТЗ.docx", "смета.xlsx"] and sk == ["архив.rar (формат .rar не читаю)"] and all(b["type"] == "text" for b in bl))
-check("Kwork: заказ дешевле 2 500 ₽ отсеян, ровно 2 500 — остаётся",
-      [kw.skipped({"name": "Бот", "category_id": "41", "priceLimit": p}) for p in ("2000.00", "2500.00")] == [True, False])
+check(f"Kwork: заказ дешевле минималки {kw.MIN_BUDGET} ₽ отсеян, ровно минималка — остаётся",
+      [kw.skipped({"name": "Бот", "category_id": "41", "priceLimit": p}) for p in (kw.MIN_BUDGET - 1, kw.MIN_BUDGET)] == [True, False])
+_names = {"25": "Дизайн / Логотип и брендинг", "41": "Разработка и IT / Скрипты, боты и mini apps"}
+_logo = {"name": "Логотип для кофейни", "category_id": "25", "priceLimit": 50000}
+check("Kwork: логотип в разделе «Дизайн» берём, логотип в IT-разделе — нет",
+      not kw.skipped(_logo, _names) and kw.skipped(_logo | {"category_id": "41"}, _names))
+_o = lambda cat: fw.Order(id="d", title="t", link="", desc="", category=cat, budget=None, for_all=True, published=None, source="kwork")  # noqa: E731
+check("Kwork: «Дизайн / Полиграфия» в профиле, «Интерьер и экстерьер» — узкая специальность",
+      fw.on_profile(_o("Kwork / Дизайн / Полиграфия")) and fw.narrow(_o("Kwork / Дизайн / Интерьер и экстерьер"))
+      and not fw.on_profile(fw.Order(id="d", title="t", link="", desc="", category="Дизайн / Полиграфия", budget=None, for_all=True, published=None)))
 (tmp / "фото.png").write_bytes(b"\xff\xd8\xff\xe0" + b"0" * 50)       # JPEG под видом .png — как прислал заказчик
 (tmp / "не-картинка.jpg").write_bytes(b"<html>")
 bl2, rd2, sk2 = at.to_blocks([tmp / "фото.png", tmp / "не-картинка.jpg"])
@@ -161,6 +177,7 @@ check("FL: ссылки на вложения со страницы заказа
 import dataclasses  # noqa: E402
 
 lay = dataclasses.replace(k0, category="Kwork / Разработка и IT / Верстка")
+os.environ["KWORK_PORTFOLIO"] = "Создание сайта"                     # не зависеть от .env
 check("Kwork: в рубрике без портфолио — предупреждение, в «Создание сайта» и у ботов — нет",
       "нет портфолио в рубрике «Верстка»" in fw.card(lay, {}, good)
       and "нет портфолио" not in fw.card(k0, {}, good)
@@ -207,9 +224,9 @@ async def _fetch(_):
     return [cheap]
 
 res = asyncio.run(fw.run_once(None, None, dry=True, fetch=_fetch))      # client=None: до нейросети дойти не должно
-check("FL.ru: бюджет 500 ₽ < минималки 2500 — пропуск без нейросети",
+check("FL.ru: бюджет 500 ₽ < минималки — пропуск без нейросети",
       res and res[0][2] is None and fw.is_seen(c, "cheap1"))
-check("минимальная цена в отклике не ниже минималки", fw.MIN_PRICE >= fw.MIN_BUDGET == 2500)
+check("минимальная цена в отклике не ниже минималки", fw.MIN_PRICE >= fw.MIN_BUDGET > 500)
 
 import time  # noqa: E402
 

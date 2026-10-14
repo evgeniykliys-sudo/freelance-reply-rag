@@ -17,12 +17,14 @@ from fl_watch import Order
 
 log = logging.getLogger("kwork_watch")
 MSK = timezone(timedelta(hours=3))
-# Разделы: 11 — Разработка и IT, 113 — Базы данных и клиентов (там парсинг). Дизайн (15) не берём — решение Евгения
-CATEGORIES = {11: "Разработка и IT", 113: "Базы данных и клиентов"}
+# Разделы: 11 — Разработка и IT, 113 — Базы данных и клиентов (там парсинг), 15 — Дизайн (графику берём с 14.10.2026,
+# решение Евгения; выключить — KWORK_DESIGN=0)
+DESIGN = (os.getenv("KWORK_DESIGN") or "1") != "0"
+CATEGORIES = {11: "Разработка и IT", 113: "Базы данных и клиентов"} | ({15: "Дизайн"} if DESIGN else {})
 PAGES = 2
-# Логотипы и векторную графику не берём: весь раздел «Логотип и брендинг» и такие заказы в других разделах (по заголовку —
-# в описании «логотип есть» встречается и в заказах на сайт)
-SKIP_CATEGORIES = {"25"}
+# Без раздела «Дизайн» логотипы и векторную графику не берём: «Логотип и брендинг» и такие заказы в других разделах
+# (по заголовку — в описании «логотип есть» встречается и в заказах на сайт)
+SKIP_CATEGORIES = set() if DESIGN else {"25"}
 SKIP_TITLE = re.compile(r"логотип|лого\b|логобук|вектор|svg|брендбук|айдентик|фирменн\w* стил|\blogo", re.I)
 
 
@@ -30,8 +32,10 @@ SKIP_TITLE = re.compile(r"логотип|лого\b|логобук|вектор|
 MIN_BUDGET = int(os.getenv("KWORK_MIN_BUDGET") or 2500)
 
 
-def skipped(w: dict) -> bool:
-    return (str(w.get("category_id")) in SKIP_CATEGORIES or bool(SKIP_TITLE.search(html.unescape(w.get("name") or "")))
+def skipped(w: dict, cat_names: dict[str, str] | None = None) -> bool:
+    design = DESIGN and (cat_names or {}).get(str(w.get("category_id")), "").startswith("Дизайн /")
+    return (str(w.get("category_id")) in SKIP_CATEGORIES
+            or (not design and bool(SKIP_TITLE.search(html.unescape(w.get("name") or ""))))
             or float(w.get("priceLimit") or 0) < MIN_BUDGET)
 
 
@@ -48,7 +52,7 @@ def parse_page(page: str, cat_names: dict[str, str]) -> list[Order]:
         return []
     out = []
     for w in arr:
-        if skipped(w):
+        if skipped(w, cat_names):
             continue
         try:
             published = datetime.strptime(w.get("date_active") or w["date_create"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK)

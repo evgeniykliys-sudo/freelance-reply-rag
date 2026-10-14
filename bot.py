@@ -11,14 +11,15 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
-import fl_submit
-import inbox_watch
-from inbox_watch import ack
-import kwork_submit
-import fl_watch
-from rag import draft_reply
+# .env — до импорта своих модулей: они читают настройки (MIN_BUDGET и др.) при загрузке
+load_dotenv(Path(__file__).parent / ".env")
 
-load_dotenv()
+import fl_submit  # noqa: E402
+import inbox_watch  # noqa: E402
+from inbox_watch import ack  # noqa: E402
+import kwork_submit  # noqa: E402
+import fl_watch  # noqa: E402
+from rag import draft_reply  # noqa: E402
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID") or 0)   # кому слать новые заказы FL.ru и кому отвечать
