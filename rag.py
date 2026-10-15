@@ -73,9 +73,10 @@ def cached(system: str) -> list[dict]:
 
 
 # цены $ за миллион токенов: вход, выход, запись в кэш, чтение из кэша (claude.com/pricing, октябрь 2026)
-PRICES = {"claude-sonnet-5-5": (2, 10, 2.5, 0.1), "claude-sonnet-5": (2, 10, 2.5, 0.2),
+PRICES = {"claude-sonnet-5-5": (2, 10, 2.5, 0.2), "claude-sonnet-5": (2, 10, 2.5, 0.2),
           "claude-haiku-5-5": (0.1, 0.5, 0.125, 0.01), "claude-haiku-4-5-20251001": (1, 5, 1.25, 0.1)}
 USAGE_DB = Path(__file__).parent / "fl_seen.db"
+DRAFT_EFFORT = os.getenv("DRAFT_EFFORT") or "medium"
 
 
 def cost_usd(model: str, inp: int, out: int, cw: int, cr: int) -> float:
@@ -106,6 +107,10 @@ def _get_claude() -> Anthropic:
         create = _client.messages.create
 
         def counted(**kw):
+            # Sonnet по умолчанию рассуждает на effort=high — скрытые рассуждения оплачиваются как выход.
+            # Для черновиков хватает medium (решение Евгения 15.10.2026, экономия); вернуть — DRAFT_EFFORT=high
+            if kw.get("model", "").startswith("claude-sonnet") and "output_config" not in kw:
+                kw["output_config"] = {"effort": DRAFT_EFFORT}
             r = create(**kw)
             _log_usage(kw.get("model", ""), r.usage)
             return r
