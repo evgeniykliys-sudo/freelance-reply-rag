@@ -159,6 +159,24 @@ def fl_links(page_html: str) -> list[dict]:
     return out
 
 
+GOOGLE = re.compile(r"https?://(?:docs|drive)\.google\.com/(document|spreadsheets|presentation|file)/d/([\w-]{20,})")
+
+
+def google_links(text: str) -> list[dict]:
+    """ТЗ по ссылке на Google Docs/Таблицы/Диск в тексте заказа → прямые ссылки на выгрузку (работает для открытых по ссылке)."""
+    out, seen = [], set()
+    for kind, fid in GOOGLE.findall(text or ""):
+        if fid in seen:
+            continue
+        seen.add(fid)
+        url, ext = {"document": (f"https://docs.google.com/document/d/{fid}/export?format=docx", "docx"),
+                    "spreadsheets": (f"https://docs.google.com/spreadsheets/d/{fid}/export?format=xlsx", "xlsx"),
+                    "presentation": (f"https://docs.google.com/presentation/d/{fid}/export/pdf", "pdf"),
+                    "file": (f"https://drive.google.com/uc?export=download&id={fid}", "")}[kind]
+        out.append({"name": f"ТЗ-google-{kind}-{fid[:6]}" + (f".{ext}" if ext else ""), "url": url})
+    return out
+
+
 def cached(order_id: str) -> list[Path]:
     d = DIR / order_id
     return sorted(x for x in d.iterdir() if x.is_file()) if d.exists() else []
@@ -180,6 +198,7 @@ async def download(o) -> dict:
                     # страницу заказа читаем запросом с вашей сессией — без открытия вкладки в Chrome
                     r = await ctx.request.get(o.link, timeout=30000)
                     found = fl_links(await r.text())
+                found += google_links(o.desc)
                 if not found:
                     return {"files": [], "error": None}
                 d = DIR / o.id
