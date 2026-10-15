@@ -434,7 +434,47 @@ async def run_once(bot, chat: int) -> int:
     return len(found)
 
 
+async def in_chat(ctx, item: dict, text: str) -> bool:
+    """Есть ли наш ответ в переписке на бирже (та же сверка, что после отправки)."""
+    if item["site"] == "kwork":
+        hist = await kwork_history(ctx.request, item["peer_id"], item["peer"])
+    else:
+        r = await ctx.request.get(f"https://www.fl.ru/projects/{item['project_id']}/offers/{item['offer_id']}"
+                                  "/messages/?limit=10&offset=0", headers=XHR)
+        hist = [{"mine": True, "text": clean(m.get("text"))} for m in (await r.json())["items"]]
+    probe = re.sub(r"\s+", " ", text)[:60]
+    return any(m["mine"] and probe in re.sub(r"\s+", " ", m["text"]) for m in hist)
+
+
+async def recover_stuck(bot, chat: int):
+    """Ответы, застрявшие в 'sending' (бот перезапустили посреди отправки): сверяем с биржей и либо отмечаем
+    отправленными, либо присылаем карточку заново — иначе кнопка «Отправить» навсегда отвечает «уже отправляется»."""
+    c = db()
+    for (item_id,) in c.execute("select id from chat_items where status='sending'").fetchall():
+        item, text, _ = load(c, item_id)
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.connect_over_cdp(CDP, timeout=8000)
+                sent = await in_chat(browser.contexts[0], item, text)
+        except Exception:
+            log.exception("сверка зависшего ответа %s", item_id)
+            sent = None
+        if sent:
+            c.execute("update chat_items set status='sent' where id=?", (item_id,)); c.commit()
+            await bot.send_message(chat, f"✅ Ответ {item['peer']} на {('Kwork' if item['site'] == 'kwork' else 'FL.ru')} "
+                                         "всё-таки ушёл (отправка прервалась на перезапуске, но сообщение в чате есть).")
+            continue
+        await post_card(bot, chat, c, item_id, item, text)
+        await bot.send_message(chat, "⚠️ Отправка этого ответа прервалась (бот перезапускался)"
+                                     + (" — в чате его нет." if sent is False else " — проверь чат, сверить не удалось.")
+                                     + " Карточка выше — можно отправить снова.")
+
+
 async def watch_forever(bot, chat: int, every: int = int(os.getenv("INBOX_EVERY_SEC") or 120)):
+    try:
+        await recover_stuck(bot, chat)
+    except Exception:
+        log.exception("зависшие ответы")
     while True:
         try:
             n = await run_once(bot, chat)
