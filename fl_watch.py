@@ -911,6 +911,11 @@ async def watch_forever(token, chat, every=60):
     import kwork_watch
     client = rag._get_claude()        # общий клиент — его расход пишется в api_usage
     sources = [("FL", fetch_all, every), ("Kwork", kwork_watch.fetch_all, int(os.getenv("KWORK_EVERY_SEC") or 60))]
+    # заказы Kwork на паузе до даты (лимит откликов исчерпан): KWORK_PAUSE_UNTIL=2026-11-01 — с этого дня снова следим
+    pause = os.getenv("KWORK_PAUSE_UNTIL", "")
+    if pause and datetime.now(NSK).date().isoformat() < pause:
+        sources = [x for x in sources if x[0] != "Kwork"]
+        log.info("Kwork: заказы на паузе до %s", pause)
     loop = asyncio.get_running_loop()
     warned = [0.0]    # когда последний раз предупреждали о закончившемся балансе API
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=40), headers={"User-Agent": UA}) as s:
