@@ -7,6 +7,7 @@ Kwork отдаёт файл только с сессией), поэтому ка
 Word и Excel превращаем в текст сами (это zip с XML — библиотеки не нужны), PDF и картинки нейросеть читает сама.
 """
 import base64
+import os
 import html
 import logging
 import re
@@ -105,6 +106,20 @@ def to_blocks(paths: list[Path]) -> tuple[list[dict], list[str], list[str]]:
                 cut = text[:budget]
                 budget -= len(cut)
                 blocks.append({"type": "text", "text": f"=== Вложение «{p.name}» ===\n{cut}"
+                                                       + ("\n[…обрезано]" if len(cut) < len(text) else "")})
+            elif ext == ".pdf" and os.getenv("DEEPSEEK_API_KEY") and os.getenv("LLM_PROVIDER", "deepseek") != "anthropic":
+                # DeepSeek не принимает PDF целиком — отдаём текст страниц (сканы без текстового слоя пропускаем)
+                try:
+                    from pypdf import PdfReader
+                    text = "\n".join((pg.extract_text() or "") for pg in PdfReader(str(p)).pages[:40])
+                except Exception:
+                    text = ""
+                if not text.strip() or budget <= 0:
+                    skipped.append(f"{p.name} (PDF без текста — скан)" if not text.strip() else f"{p.name} (не влез)")
+                    continue
+                cut = text[:budget]
+                budget -= len(cut)
+                blocks.append({"type": "text", "text": f"=== Вложение «{p.name}» (текст PDF) ===\n{cut}"
                                                        + ("\n[…обрезано]" if len(cut) < len(text) else "")})
             elif ext == ".pdf":
                 blocks.append({"type": "text", "text": f"=== Вложение «{p.name}» (PDF ниже) ==="})

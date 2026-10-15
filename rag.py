@@ -3,12 +3,16 @@ from pathlib import Path
 
 import chromadb
 from anthropic import Anthropic
+from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
 CHROMA_DIR = Path(__file__).parent / "chroma_db"
 COLLECTION_NAME = "freelance"
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-CLAUDE_MODEL = os.getenv("RAG_MODEL") or "claude-sonnet-5-5"
+load_dotenv(Path(__file__).parent / ".env")             # PROVIDER и модели читаются при импорте
+# провайдер нейросети: DeepSeek (Anthropic-совместимый API) при наличии ключа, иначе Anthropic. Вернуть Claude — LLM_PROVIDER=anthropic
+PROVIDER = "deepseek" if os.getenv("DEEPSEEK_API_KEY") and os.getenv("LLM_PROVIDER", "deepseek") != "anthropic" else "anthropic"
+CLAUDE_MODEL = os.getenv("RAG_MODEL") or ("deepseek-flash" if PROVIDER == "deepseek" else "claude-sonnet-5-5")
 TOP_K = 10
 # ChromaDB по умолчанию использует squared L2 (не косинус 0-2!). Порог откалиброван
 # эмпирически на реальных примерах (см. scripts/calibrate.py): явные совпадения по
@@ -73,7 +77,9 @@ def cached(system: str) -> list[dict]:
 
 
 # цены $ за миллион токенов: вход, выход, запись в кэш, чтение из кэша (claude.com/pricing, октябрь 2026)
-PRICES = {"claude-sonnet-5-5": (2, 10, 2.5, 0.2), "claude-sonnet-5": (2, 10, 2.5, 0.2),
+# DeepSeek — по пиковым ценам (верхняя оценка; вне пика вдвое дешевле), записи в кэш у него нет — считаем как обычный вход
+PRICES = {"deepseek-flash": (0.3, 1.2, 0.3, 0.006), "deepseek-v4-pro": (1.32, 3.96, 1.32, 0.044),
+          "claude-sonnet-5-5": (2, 10, 2.5, 0.2), "claude-sonnet-5": (2, 10, 2.5, 0.2),
           "claude-haiku-5-5": (0.1, 0.5, 0.125, 0.01), "claude-haiku-4-5-20251001": (1, 5, 1.25, 0.1)}
 USAGE_DB = Path(__file__).parent / "fl_seen.db"
 DRAFT_EFFORT = os.getenv("DRAFT_EFFORT") or "medium"
@@ -100,16 +106,23 @@ def _log_usage(model: str, u):
         pass                                   # учёт не должен ломать черновики
 
 
+def out_of_money(e: Exception) -> bool:
+    """Кончились деньги на API: Anthropic — «credit balance is too low», DeepSeek — HTTP 402 «Insufficient Balance»."""
+    t = str(e).lower()
+    return "credit balance" in t or "insufficient balance" in t or getattr(e, "status_code", None) == 402
+
+
 def _get_claude() -> Anthropic:
     global _client
     if _client is None:
-        _client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = (Anthropic(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com/anthropic")
+                   if PROVIDER == "deepseek" else Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")))
         create = _client.messages.create
 
         def counted(**kw):
             # Sonnet по умолчанию рассуждает на effort=high — скрытые рассуждения оплачиваются как выход.
             # Для черновиков хватает medium (решение Евгения 15.10.2026, экономия); вернуть — DRAFT_EFFORT=high
-            if kw.get("model", "").startswith("claude-sonnet") and "output_config" not in kw:
+            if kw.get("model", "").startswith(("claude-sonnet", "deepseek")) and "output_config" not in kw and "thinking" not in kw:
                 kw["output_config"] = {"effort": DRAFT_EFFORT}
             r = create(**kw)
             _log_usage(kw.get("model", ""), r.usage)

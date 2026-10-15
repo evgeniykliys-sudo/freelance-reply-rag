@@ -4,3 +4,4 @@ sentence-transformers>=3.0
 chromadb>=0.5
 python-dotenv>=1.0
 playwright>=1.45
+pypdf
