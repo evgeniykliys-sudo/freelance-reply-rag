@@ -41,7 +41,7 @@ UA = "Mozilla/5.0 (fl-watch; personal order notifier)"
 CATEGORIES = {2: "Сайты", 3: "Дизайн", 5: "Программирование", 30: "Маркетплейс менеджмент", 31: "AI",
               32: "Социальные сети", 34: "Мессенджеры", 35: "Рисунки и иллюстрации", 36: "Mobile",
               37: "Браузеры", 40: "Интернет-магазины", 41: "Автоматизация бизнеса", 42: "Фирменный стиль"}
-TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or "claude-haiku-5-5"
+TRIAGE_MODEL = os.getenv("TRIAGE_MODEL") or ("deepseek-flash" if rag.PROVIDER == "deepseek" else "claude-haiku-5-5")
 # проектирование и узкие специальности — не берём (решение Евгения): по рубрике и по словам в заказе, без нейросети
 NARROW_RUBRICS = {"Архитектура", "Интерьеры", "Интерьер и экстерьер", "Ландшафтный дизайн", "Промышленный дизайн", "Инжиниринг"}
 NARROW_WORDS = (r"\bПСД\b|\bПД\b|\bРД\b|проектн\w* документац|рабоч\w* документац|\bраздел\w* (АР|КР|ОВ|ВК|ЭОМ|ГП|ПОС)\b|"
@@ -322,6 +322,8 @@ AI-автоматизация, n8n, парсеры; за сайты и диза�
    если такого проекта нет в переданных фрагментах портфолио. Можно сослаться только на проект/ссылку из фрагментов,
    и только если он реально похож. Если похожего нет — покажи компетентность ПЛАНОМ: как сделаешь (инструменты, шаги,
    как проверишь результат). Не пиши и обратного («опыта нет», «честно скажу, не делал») — просто план.
+1б. Начинай с «Здравствуйте!» (не «Привет»), дальше — деловой, но живой тон. Пиши короткими предложениями,
+   по 1–2 мысли; не склеивай перечисления в одно длинное предложение через точку с запятой.
 1а. Отклик пишешь ТЫ (Евгений) заказчику. Не обращайся к заказчику по имени Евгений и вообще не называй имён,
    если заказчик сам не подписался в тексте заказа.
 2. Цена. ЕСЛИ У ЗАКАЗА УКАЗАН БЮДЖЕТ (на Kwork — «желаемый») — цена {PRICE_MIN_SHARE:.0%}–{PRICE_MAX_SHARE:.0%} от него
@@ -856,7 +858,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
             failed = failed or res
         elif res:
             done.append(res)
-    if failed is not None and "credit balance" in str(failed).lower():
+    if failed is not None and rag.out_of_money(failed):
         raise failed                                    # чтобы watch_forever предупредил о балансе
     return done
 
@@ -887,11 +889,11 @@ async def watch_forever(token, chat, every=60):
                 except Exception as e:
                     log.exception("ошибка прохода %s", name)
                     # кончились деньги на API — без этого бот молча перестаёт присылать заказы; пишем раз в 3 часа
-                    if "credit balance" in str(e).lower() and loop.time() - warned[0] > 3 * 3600:
+                    if rag.out_of_money(e) and loop.time() - warned[0] > 3 * 3600:
                         warned[0] = loop.time()
                         await s.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-                            "chat_id": chat, "text": "⚠️ Закончился баланс API Anthropic — заказы не разбираю и черновики "
-                                                     "не пишу. Пополни баланс: console.anthropic.com → Plans & Billing. "
+                            "chat_id": chat, "text": "⚠️ Закончился баланс API нейросети — заказы не разбираю и черновики "
+                                                     f"не пишу. Пополни баланс: {'platform.deepseek.com → Top up' if rag.PROVIDER == 'deepseek' else 'console.anthropic.com → Plans & Billing'}. "
                                                      "Пропущенные за это время свежие заказы разберу после пополнения."})
                 await asyncio.sleep(max(5, period - (loop.time() - started)))
 

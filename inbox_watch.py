@@ -264,7 +264,7 @@ def draft(item: dict, file_blocks: list[dict]) -> str:
     try:
         text = ask(item, conversation(item, file_blocks))
     except Exception as e:
-        if not file_blocks or "credit balance" in str(e).lower():
+        if not file_blocks or rag.out_of_money(e):
             raise
         log.warning("%s: вложения не приняты моделью, черновик без них", item["key"])
         item["att_error"] = "нейросеть не приняла вложения — черновик без них"
