@@ -60,7 +60,8 @@ async def _read_state(page) -> dict:
         "competitors": int(resp.group(1)) if resp else 0,
         "prices": tuple(int(x.replace(" ", "").replace("\xa0", "")) for x in prices.groups()) if prices else None,
         "terms": tuple(int(x) for x in terms.groups()) if terms else None,
-        "logged_in": "Мои отклики" in t,
+        # «Мои отклики» из текста шапки FL.ru убрал (16.10) — признаки входа: счётчик откликов или ссылка выхода
+        "logged_in": "Мои отклики" in t or "Осталось откликов" in t or await page.locator("a[href*=logout]").count() > 0,
         "has_form": await page.locator("#newoffer #el-descr").count() > 0,
     }
 

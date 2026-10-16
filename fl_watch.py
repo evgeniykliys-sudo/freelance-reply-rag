@@ -484,7 +484,7 @@ def draft(o: Order) -> dict:
                                                   messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
         reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
-        price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
+        price = re.search(r"ЦЕНА:\s*(\d[\d \xa0]*)", text)   # «ЦЕНА: договорная» — без цифр, цены нет
         days = re.search(r"СРОК:\s*(\d+)", text)
         if reply and reply.group(1).strip() and price and days:
             break
@@ -696,12 +696,12 @@ def drop_final_questions(reply: str) -> str:
 
 def parse_draft(text: str) -> dict:
     reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
-    price = re.search(r"ЦЕНА:\s*([\d\s]+)", text)
+    price = re.search(r"ЦЕНА:\s*(\d[\d \xa0]*)", text)   # «ЦЕНА: договорная» — без цифр, цены нет
     days = re.search(r"СРОК:\s*(\d+)", text)
     works = re.search(r"РАБОТЫ:\s*([^\n]*)", text)
     nums = [int(x) for x in re.findall(r"\d+", works.group(1))] if works else []
     return {"reply": drop_final_questions((reply.group(1) if reply else text).strip()),
-            "price": int(price.group(1).replace(" ", "")) if price else None,
+            "price": int(re.sub(r"\D", "", price.group(1))) if price else None,
             "days": int(days.group(1)) if days else None,
             "works": fl_submit.works_from_numbers(nums)}
 
