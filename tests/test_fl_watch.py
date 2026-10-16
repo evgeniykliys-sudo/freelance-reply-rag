@@ -232,7 +232,7 @@ import time  # noqa: E402
 
 _tri, _draft = fw.triage, fw.draft
 fw.triage = lambda client, o: {"take": True}
-fw.draft = lambda o: (time.sleep(1), {"reply": "x" * 200, "price": 5000, "days": 1, "works": []})[1]
+fw.draft = lambda o, big=False: (time.sleep(1), {"reply": "x" * 200, "price": 5000, "days": 1, "works": []})[1]
 pair = [dataclasses.replace(k0, id=f"kwpar{i}", budget=5000, files=[], published=_dt.now(timezone.utc)) for i in (1, 2)]
 
 
