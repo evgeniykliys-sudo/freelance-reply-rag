@@ -313,9 +313,21 @@ async def handle_text(message: Message):
     await message.answer(text)
 
 
-async def stop_at_night():
-    """В конце рабочего дня останавливаемся сами; утром бота запустит Планировщик Windows (start_bot.bat)."""
-    await asyncio.sleep(fl_watch.seconds_until_end())
+async def stop_at_night(watcher=None):
+    """В конце рабочего дня останавливаемся сами; утром бота запустит Планировщик Windows (start_bot.bat).
+    Если в очереди есть ответы Kwork (ждут конца проверки заказчика) — до 01:00 НСК работаем только ради них:
+    Kwork проверяет до 21:00 МСК, и ответ должен уйти сразу, а не утром."""
+    if fl_watch.in_work_hours():
+        # запуск ради очереди после полуночи: «до 22:00» считалось бы до завтрашних 22:00 — бот висел бы весь день
+        await asyncio.sleep(fl_watch.seconds_until_end())
+    if inbox_watch.queued_count() and inbox_watch.in_queue_hours():
+        logging.info("рабочий день окончен, но в очереди ответы Kwork — слежу только за ними до %02d:00",
+                     inbox_watch.QUEUE_END_HOUR)
+        if watcher:
+            watcher.cancel()                                 # новые заказы — утром
+        inbox_watch.queue_only = True
+        while inbox_watch.queued_count() and inbox_watch.in_queue_hours():
+            await asyncio.sleep(60)
     logging.info("рабочий день окончен (%s) — останавливаюсь до утра", fl_watch.WORK_HOURS)
     await dp.stop_polling()
 
@@ -330,7 +342,9 @@ async def main():
     if lock is None:
         logging.info("бот уже запущен — второй экземпляр не нужен")
         return
-    if not fl_watch.in_work_hours():
+    # ПК включили между 22:00 и 01:00, а в очереди ответы Kwork — запускаемся только ради очереди
+    queue_mode = not fl_watch.in_work_hours() and inbox_watch.queued_count() > 0 and inbox_watch.in_queue_hours()
+    if not fl_watch.in_work_hours() and not queue_mode:
         logging.info("сейчас нерабочее время (%s, Новосибирск) — запустит Планировщик утром", fl_watch.WORK_HOURS)
         return
     # в 8:00 / сразу после включения ПК сети или Telegram может ещё не быть — ждём, а не падаем
@@ -339,14 +353,19 @@ async def main():
             await bot.get_me()
             break
         except TelegramNetworkError as e:
-            if not fl_watch.in_work_hours():
+            if not fl_watch.in_work_hours() and not queue_mode:
                 return
             logging.warning("Telegram пока недоступен (%s) — повтор через 30 с", e)
             await asyncio.sleep(30)
-    asyncio.create_task(reconcile_sending(bot))          # зависшие «отправляется» после прошлого запуска
-    watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
+    if queue_mode:
+        logging.info("нерабочее время, но в очереди ответы Kwork — слежу только за ними")
+        inbox_watch.queue_only = True
+        watcher = asyncio.create_task(asyncio.sleep(0))      # заказы не отслеживаем
+    else:
+        asyncio.create_task(reconcile_sending(bot))      # зависшие «отправляется» после прошлого запуска
+        watcher = asyncio.create_task(fl_watch.watch_forever(BOT_TOKEN, ADMIN_ID, every=FL_EVERY))
     inbox = asyncio.create_task(inbox_watch.watch_forever(bot, ADMIN_ID))
-    night = asyncio.create_task(stop_at_night())
+    night = asyncio.create_task(stop_at_night(watcher))
     try:
         await dp.start_polling(bot)
     finally:
