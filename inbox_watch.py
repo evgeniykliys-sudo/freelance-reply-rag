@@ -118,7 +118,7 @@ async def kwork_new(req, c) -> list[dict]:
             subject = next((re.sub(r"^Добрый день\. Тема: ", "", m["text"]) for m in hist if "Тема:" in m["text"]), "")
             out.append({"site": "kwork", "key": key, "peer": ch["username"], "peer_id": ch["USERID"],
                         "subject": subject[:120], "url": f"https://kwork.ru/inbox/{ch['username']}",
-                        "history": hist[-12:], "new": new, "last": t})
+                        "history": hist[-HISTORY:], "new": new, "last": t})
         else:
             set_seen(c, key, t)
     if first:
@@ -165,7 +165,7 @@ async def fl_new(req, c) -> list[dict]:
             out.append({"site": "fl", "key": key, "peer": "заказчик", "subject": it.get("title", "")[:120],
                         "project_id": it["project_id"], "offer_id": it["id"],
                         "url": f"https://www.fl.ru/messages/?dialogId={it['id']}&dialogType=offer",
-                        "history": hist[-12:], "new": new, "last": t})
+                        "history": hist[-HISTORY:], "new": new, "last": t})
         else:
             set_seen(c, key, t)
     if first:
@@ -207,6 +207,8 @@ SYSTEM = """Ты отвечаешь заказчику в чате {site} от �
 Правила:
 1. Ответь на КАЖДЫЙ вопрос и просьбу из новых сообщений заказчика — конкретно: цена и срок цифрами, если спрашивают.
    Держись того, что уже обещано в переписке (цены, сроки, этапы); не меняй без причины.
+   Про цену и срок не спрашивают — не упоминай их, без «по цене всё как договорились». Сумму, которой нет
+   в переписке, называй только как ответ на вопрос о новой работе — никогда как «договорились».
 2. Если заказчик прислал файлы (ТЗ, отчёты, скриншоты) — прочитай их и опирайся на 1–2 конкретные детали.
 3. Срок важен заказчику так же, как цена: до 15 000 ₽ — 1–2 дня, до 40 000 ₽ — не больше 5–7 дней.
    Не дроби работу на отдельно оплачиваемые этапы и «остальное отдельным бюджетом», если заказчик сам об этом не просит
@@ -279,7 +281,38 @@ def draft(item: dict, file_blocks: list[dict]) -> str:
             {"role": "user", "content": "Убери фразы, что портфолио или опыта по теме нет, — так заказчик уйдёт. Вместо "
                                         "этого назови самые близкие работы из списка и чем они похожи. Остальное оставь. "
                                         "Выведи только новый текст ответа."}])
+    unknown = unknown_prices(text, item)
+    if unknown and not re.search(PRICE_ASKED, " ".join(m["text"] for m in item["new"]), re.I):
+        # о цене не спрашивали, а в ответе суммы, которых нет в переписке, — нейросеть их выдумала
+        # (так было: «как договорились: 12 000 ₽, 5 дней» при договорённости 20 000 ₽ / 14 дней)
+        log.warning("%s: в черновике выдуманные суммы %s — переписываю", item["key"], unknown)
+        text = ask(item, conversation(item, file_blocks), [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": f"Суммы {', '.join(unknown)} в переписке не назывались, а о цене заказчик не "
+                                        "спрашивал. Убери из ответа цены и сроки целиком. Остальное оставь. "
+                                        "Выведи только новый текст ответа."}])
     return text
+
+
+HISTORY = 30          # сообщений переписки в запросе: при 12 договорённость о цене уходила из окна, и цену выдумывали
+PRICE_ASKED = r"цен|стоим|сколько|бюджет|₽|руб|оплат|доплат"
+
+
+def amounts(text: str) -> set[int]:
+    """Суммы в рублях из текста: «12 000 ₽», «1500 руб», «20 тыс.»."""
+    out = set()
+    for num, k in re.findall(r"(\d[\d \xa0]*\d|\d)\s*(тыс\.?|к\b)?\s*(?:₽|руб|р\.)", text, re.I):
+        v = int(re.sub(r"\D", "", num))
+        out.add(v * 1000 if k else v)
+    for num in re.findall(r"(\d+)\s*тыс", text, re.I):
+        out.add(int(num) * 1000)
+    return out
+
+
+def unknown_prices(text: str, item: dict) -> list[str]:
+    """Суммы из черновика, которых нет ни в одном сообщении переписки."""
+    known = amounts(" ".join(m["text"] for m in item.get("history", []) + item.get("new", [])))
+    return [f"{v:,} ₽".replace(",", " ") for v in sorted(amounts(text) - known)]
 
 
 # «портфолио по полиграфии нет», «отдельного раздела … нет», «опыта … не было»
@@ -293,8 +326,10 @@ def revise(item: dict, old: str, wish: str) -> str:
                                     "оставь как было. Выведи только новый текст ответа."}])
 
 
-def problems(text: str) -> list[str]:
+def problems(text: str, item: dict | None = None) -> list[str]:
     probs = [b for b in fl_watch.BANNED if b not in (r"\bделал[аи]?\b",) and re.search(b, text, re.I)]
+    if item and (unknown := unknown_prices(text, item)):
+        probs.append(f"суммы {', '.join(unknown)} в переписке не назывались — сверь с договорённостью")
     if re.search(r"\*\*|^#+ ", text, re.M):
         probs.append("markdown — в чате будут видны звёздочки")
     if re.search(SELF_DOWN, text, re.I):
@@ -319,7 +354,7 @@ def card(item: dict, text: str, status: str = "new") -> str:
         lines.append(f"🤷 Ответ, похоже, не нужен: {e(text.split(':', 1)[-1].strip())}")
     else:
         lines += ["✍️ <b>Черновик ответа:</b>", e(text[:2300])]
-        probs = problems(text)
+        probs = problems(text, item)
         if probs:
             lines.append(f"\n❗ проверь: {e(', '.join(probs))}")
     if status == "sent":
