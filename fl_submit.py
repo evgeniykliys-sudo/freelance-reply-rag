@@ -4,6 +4,7 @@ Chrome должен быть запущен с портом отладки (star
 заполняем форму на странице заказа, как человек. Каждый отклик платный — отправка только по кнопке в Telegram
 («Утвердить и отправить»); предпросмотра нет (prepare() с скриншотом остался для ручных проверок).
 """
+import asyncio
 import json
 import logging
 import os
@@ -180,24 +181,33 @@ async def submit(link: str, text: str, price: int, days: int, works: list[int], 
             log.info("отправка %s: заполняю форму", project_id)
             await _fill(page, text, price, days, works)
             log.info("отправка %s: нажимаю «Отправить отклик»", project_id)
-            await page.get_by_role("button", name="Отправить отклик").click()
-            await page.wait_for_timeout(4000)
-            err = await page.evaluate("""() => [...document.querySelectorAll('[id$=-error-text]')]
-                .map(e => e.innerText.trim()).filter(Boolean)""")
-            if err:
-                raise NotReady("FL.ru не принял отклик: " + "; ".join(err))
+            # с 16.10 FL.ru после отправки перезагружает страницу (#new_offer), и ожидания на ней висли до таймаута бота,
+            # хотя отклик уже ушёл. Поэтому после клика со страницей почти не работаем: успех — по JSON-списку откликов
+            await page.get_by_role("button", name="Отправить отклик").click(no_wait_after=True)
             log.info("отправка %s: проверяю, что отклик появился", project_id)
-            ok = await offer_exists_ctx(page.context, project_id)
-            if ok is None:                                  # JSON недоступен — запасной путь через страницу «Мои отклики»
-                await page.goto("https://www.fl.ru/projects/my-offers/", wait_until="domcontentloaded")
-                await page.wait_for_timeout(2500)
-                ok = f"/projects/{project_id}/" in await page.evaluate("() => document.body.innerHTML")
-            after = await _read_state(page) if "my-offers" not in page.url else st
+            ok = None
+            for _ in range(6):
+                await asyncio.sleep(4)
+                ok = await offer_exists_ctx(page.context, project_id)
+                if ok:
+                    break
+            if not ok:
+                try:
+                    err = await asyncio.wait_for(page.evaluate("""() => [...document.querySelectorAll('[id$=-error-text]')]
+                        .map(e => e.innerText.trim()).filter(Boolean)"""), 10)
+                except Exception:
+                    err = []
+                if err:
+                    raise NotReady("FL.ru не принял отклик: " + "; ".join(err))
             log.info("отправка %s: готово, ok=%s", project_id, ok)
-            return {"ok": bool(ok), "left": after["left"], "competitors": st["competitors"]}
+            left = st["left"] - 1 if ok and isinstance(st["left"], int) else st["left"]
+            return {"ok": bool(ok), "left": left, "competitors": st["competitors"]}
         finally:
-            await page.close()
-            await browser.close()
+            for close in (page.close, browser.close):   # закрытие вкладки посреди перезагрузки тоже может зависнуть
+                try:
+                    await asyncio.wait_for(close(), 10)
+                except Exception:
+                    log.warning("отправка %s: не закрылась вкладка/подключение", project_id, exc_info=True)
 
 
 def portfolio_menu() -> str:
