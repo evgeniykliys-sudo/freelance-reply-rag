@@ -462,7 +462,9 @@ def posting_blocks(o: Order, intro: str, with_files: bool = True) -> list[dict]:
     return [{"type": "text", "text": head}] + blocks
 
 
-def draft(o: Order) -> dict:
+def draft(o: Order, big: bool = False) -> dict:
+    """big — сортировка сочла проект крупным (больше ~2 недель): цена по правилу 60–65% — только за узкий первый
+    этап, а в отклике отдельно оценка всего проекта (решение Евгения 16.10: «AI-матчинг за 1 300 ₽, 2 дня» смущал)."""
     posting = f"Раздел: {o.category}\nБюджет: {budget_text(o)}\n{o.title}\n\n{o.desc}"
     chunks = rag.search(posting)[:6]
     context = "\n\n".join(f"[{c['type']}] {c['text']}" for c in chunks)
@@ -483,7 +485,7 @@ def draft(o: Order) -> dict:
             r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
                                                   messages=messages)
         text = "".join(b.text for b in r.content if b.type == "text").strip()
-        reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
+        reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА[^:\n]{0,20}:|\Z)", text, re.S)
         price = re.search(r"ЦЕНА:\s*(\d[\d \xa0]*)", text)   # «ЦЕНА: договорная» — без цифр, цены нет
         days = re.search(r"СРОК:\s*(\d+)", text)
         if reply and reply.group(1).strip() and price and days:
@@ -492,6 +494,26 @@ def draft(o: Order) -> dict:
         messages = messages + [{"role": "assistant", "content": text or "…"},
                                {"role": "user", "content": "Перепиши строго в формате: ОТКЛИК: … / ЦЕНА: … ₽ / СРОК: … дн. Без вступлений."}]
     d = parse_draft(text)
+    full = None
+    if big and o.budget:
+        lo, hi = price_range(o)
+        messages = messages + [{"role": "assistant", "content": text},
+                               {"role": "user", "content":
+                                f"Проект крупный, а бюджет заказчика {o.budget} ₽ — это цена только первого этапа, не "
+                                "всего проекта. Перепиши отклик:\n"
+                                f"1) ЦЕНА и СРОК — за первый этап: узкий и честно выполнимый за {lo}–{hi} ₽ и 1–3 дня "
+                                "(например, аудит и замеры с отчётом и планом работ). Не обещай в нём улучшений и "
+                                "результата всего проекта.\n"
+                                "2) Отдельной фразой в отклике — оценка всего проекта одной суммой и сроком: рыночная "
+                                "цена со скидкой новичка, а не от бюджета заказчика.\n"
+                                "СУТЬ заново не пиши. Формат: ОТКЛИК / ЦЕНА (первый этап) / СРОК (первый этап) / "
+                                "ВЕСЬ ПРОЕКТ: <число> ₽, <число> дн. / РАБОТЫ."}]
+        r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)),
+                                              messages=messages)
+        text_s = "".join(b.text for b in r.content if b.type == "text").strip()
+        staged = parse_draft(text_s)
+        if staged.get("price") and staged.get("days") and staged.get("full"):
+            d, text, full = staged, text_s, staged["full"]
     if price_vs_budget(o, d.get("price")):
         # цена вне 60–65% бюджета — переписываем под правило
         lo, hi = price_range(o)
@@ -551,6 +573,8 @@ def draft(o: Order) -> dict:
                           "works": third.get("works") or d.get("works", [])})
             missing = unanswered(o, d["reply"])
     d["unanswered"] = missing
+    if full:
+        d["full"] = full          # последующие переписывания формат ВЕСЬ ПРОЕКТ не знают — оценку несём сами
     return with_price(clamp_price(o, d))
 
 
@@ -577,9 +601,15 @@ def with_price(d: dict) -> dict:
     if not p or not reply:
         return d
     variants = {f"{p:,}".replace(",", " "), f"{p:,}".replace(",", " "), str(p)}
+    if d.get("full"):
+        fp, fn = d["full"]
+        if not any(v in reply for v in (f"{fp:,}".replace(",", " "), f"{fp:,}".replace(",", "\xa0"), str(fp))):
+            reply = (reply.rstrip() + "\n\n" + f"Весь проект по моей оценке — {fp:,} ₽".replace(",", " ")
+                     + (f", {fn} {days_word(fn)}." if fn else "."))
     if any(v in reply for v in variants):
-        return d
-    tail = f"Стоимость — {f'{p:,}'.replace(',', ' ')} ₽" + (f", срок — {n} {days_word(n)}." if n else ".")
+        return {**d, "reply": reply}
+    what = "Первый этап" if d.get("full") else "Стоимость"
+    tail = f"{what} — {f'{p:,}'.replace(',', ' ')} ₽" + (f", срок — {n} {days_word(n)}." if n else ".")
     return {**d, "reply": reply.rstrip() + "\n\n" + tail}
 
 
@@ -695,12 +725,16 @@ def drop_final_questions(reply: str) -> str:
 
 
 def parse_draft(text: str) -> dict:
-    reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА:|\Z)", text, re.S)
-    price = re.search(r"ЦЕНА:\s*(\d[\d \xa0]*)", text)   # «ЦЕНА: договорная» — без цифр, цены нет
-    days = re.search(r"СРОК:\s*(\d+)", text)
+    reply = re.search(r"ОТКЛИК:\s*(.*?)(?:\n\s*ЦЕНА[^:\n]{0,20}:|\Z)", text, re.S)
+    # «ЦЕНА: договорная» — без цифр, цены нет; «ЦЕНА (первый этап): …» — у крупных проектов
+    price = re.search(r"ЦЕНА[^:\n]{0,20}:\s*(\d[\d \xa0]*)", text)
+    days = re.search(r"СРОК[^:\n]{0,20}:\s*(\d+)", text)
     works = re.search(r"РАБОТЫ:\s*([^\n]*)", text)
     nums = [int(x) for x in re.findall(r"\d+", works.group(1))] if works else []
+    full = re.search(r"ВЕСЬ ПРОЕКТ:\s*(\d[\d \xa0]*)[^\n\d]*(\d+)?", text)
     return {"reply": drop_final_questions((reply.group(1) if reply else text).strip()),
+            **({"full": (int(re.sub(r"\D", "", full.group(1))), int(full.group(2)) if full.group(2) else None)}
+               if full else {}),
             "price": int(re.sub(r"\D", "", price.group(1))) if price else None,
             "days": int(days.group(1)) if days else None,
             "works": fl_submit.works_from_numbers(nums)}
@@ -711,15 +745,17 @@ def revise(o: Order, d: dict, wish: str) -> dict:
     если в пожелании новая цена/срок — берём их."""
     ids = {w["id"]: i for i, w in enumerate(fl_submit.PORTFOLIO, 1)}
     works = ", ".join(str(ids[w]) for w in d.get("works", []) if w in ids) or "нет"
+    full = d.get("full")
     prev = (f"ОТКЛИК:\n{d['reply']}\nЦЕНА: {d.get('price') or ''} ₽\nСРОК: {d.get('days') or ''} дн.\n"
-            f"РАБОТЫ: {works}")
+            + (f"ВЕСЬ ПРОЕКТ: {full[0]} ₽, {full[1] or ''} дн.\n" if full else "") + f"РАБОТЫ: {works}")
     msgs = [{"role": "user", "content": posting_blocks(o, "")},
             {"role": "assistant", "content": prev},
             {"role": "user", "content": f"Перепиши отклик с учётом пожелания: «{wish}». Всё, чего пожелание не касается "
                                         "(цена, срок, работы, факты), оставь ровно как было. Но если пожелание меняет "
                                         "объём или состав работ (добавить или убрать часть, без этапов, всё ТЗ сразу) — "
                                         "пересчитай ЦЕНУ и СРОК под новый объём по тем же правилам, не втискивай больше "
-                                        "работы в прежние цифры. Формат тот же: ОТКЛИК / ЦЕНА / СРОК / РАБОТЫ."}]
+                                        "работы в прежние цифры. Формат тот же: ОТКЛИК / ЦЕНА / СРОК / "
+                                        + ("ВЕСЬ ПРОЕКТ / " if full else "") + "РАБОТЫ."}]
     try:
         r = rag._get_claude().messages.create(model=rag.CLAUDE_MODEL, max_tokens=4000, system=rag.cached(draft_system(o)), messages=msgs)
     except anthropic.BadRequestError:
@@ -732,6 +768,8 @@ def revise(o: Order, d: dict, wish: str) -> dict:
     new["days"] = new["days"] or d.get("days")
     if "РАБОТЫ:" not in text:
         new["works"] = d.get("works", [])
+    if full and not new.get("full"):
+        new["full"] = full
     new["unanswered"] = unanswered(o, new["reply"])
     return new
 
@@ -757,7 +795,9 @@ def card(o: Order, tri: dict, d: dict, version: int = 1, status: str = "new") ->
              budget,
              "", f"<i>{e(o.desc[:400])}{'…' if len(o.desc) > 400 else ''}</i>", ""]
     if d.get("price"):
-        lines.append(f"🏷 предлагаю: <b>{d['price']:,} ₽</b>".replace(",", " ") + (f" · {d['days']} дн." if d.get("days") else ""))
+        lines.append(f"🏷 предлагаю: <b>{d['price']:,} ₽</b>".replace(",", " ") + (f" · {d['days']} дн." if d.get("days") else "")
+                     + (f" — первый этап; весь проект ≈ {d['full'][0]:,} ₽".replace(",", " ")
+                        + (f" · {d['full'][1]} дн." if d["full"][1] else "") if d.get("full") else ""))
     att = o.att or {}
     if att.get("read"):
         lines.append("📄 ТЗ прочитано: " + e(", ".join(att["read"])))
@@ -871,7 +911,7 @@ async def run_once(session, client, token=None, chat=None, dry=False, first_run_
             _, read, skipped = attachments.to_blocks(attachments.cached(o.id))
             if got["files"] or got["error"] or skipped:
                 o.att = {"read": read, "skipped": skipped, "error": got["error"]}
-        d = await asyncio.to_thread(draft, o)
+        d = await asyncio.to_thread(draft, o, bool(tri.get("big")))
         if not dry:
             msg_id = await send(session, token, chat, card(o, tri, d), o.link, o.id)
             if not msg_id:
