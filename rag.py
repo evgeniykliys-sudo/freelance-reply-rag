@@ -126,6 +126,13 @@ def _get_claude() -> Anthropic:
                 kw["output_config"] = {"effort": DRAFT_EFFORT}
             r = create(**kw)
             _log_usage(kw.get("model", ""), r.usage)
+            if (r.stop_reason == "max_tokens" and not any(b.type == "text" and b.text.strip() for b in r.content)
+                    and "thinking" not in kw):
+                # на длинных ТЗ DeepSeek тратил весь max_tokens на скрытые рассуждения и не писал ответ —
+                # приходил пустой черновик (заказ турклуба, 16.10). Повторяем без рассуждений
+                kw = {k: v for k, v in kw.items() if k != "output_config"}
+                r = create(**kw, thinking={"type": "disabled"})
+                _log_usage(kw.get("model", ""), r.usage)
             return r
         _client.messages.create = counted
     return _client

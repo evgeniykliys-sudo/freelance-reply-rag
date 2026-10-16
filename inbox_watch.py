@@ -70,6 +70,13 @@ def set_seen(c, key: str, last: int):
     c.commit()
 
 
+def unanswered_msgs(hist: list[dict], before: int) -> list[dict]:
+    """Сообщения заказчика, на которые мы ещё не ответили: позже прошлой проверки И позже нашего последнего сообщения.
+    Без второго условия бот писал черновик на уже отвеченное (ответили на сайте между проверками — FL, 16.10)."""
+    last_mine = max((m["time"] for m in hist if m["mine"]), default=0)
+    return [m for m in hist if not m["mine"] and m["time"] > max(before, last_mine)]
+
+
 def load(c, item_id: int):
     r = c.execute("select item_json, draft, status from chat_items where id=?", (item_id,)).fetchone()
     return (json.loads(r[0]), r[1], r[2]) if r else None
@@ -90,13 +97,32 @@ def clean(text: str) -> str:
     return t.replace("\r\n", "\n").strip()
 
 
-async def kwork_new(req, c) -> list[dict]:
+async def kwork_chats(req) -> list[dict]:
+    """Список диалогов Kwork — JSON window.chatList со страницы kwork.ru/inbox."""
     r = await req.get("https://kwork.ru/inbox", timeout=40000)
     page = await r.text()
     i = page.find("window.chatList=")
     if i < 0:
         raise RuntimeError("Kwork: нет списка чатов — в Chrome не выполнен вход?")
     chats, _ = json.JSONDecoder().raw_decode(page[i + len("window.chatList="):])
+    return chats
+
+
+def dialog_state(ch: dict) -> str:
+    """Состояние диалога Kwork: open — можно писать; moderated — Kwork проверяет заказчика («Переписка временно
+    недоступна…», обычно ~2 ч, с 9 до 21 МСК); closed — писать нельзя совсем (Kwork признал заказчика спамером,
+    аккаунт удалён или старый диалог закрыт: allowedDialog=false — так у диалогов 2022–2024 годов).
+    Признаки — moderationStatus и lastMessage.inboxModeration (видно 12.10 на диалоге Alphalive: user_from — заказчик)."""
+    mod = (ch.get("lastMessage") or {}).get("inboxModeration") or {}
+    if ch.get("blocked") or ch.get("allowedDialog") is False or mod.get("spammed_at") or ch.get("moderationStatus") == "spam":
+        return "closed"
+    if mod.get("is_processing") or ch.get("moderationStatus") in ("new", "processing"):
+        return "moderated"
+    return "open"
+
+
+async def kwork_new(req, c) -> list[dict]:
+    chats = await kwork_chats(req)
     first = seen(c, "kw:init") is None
     out = []
     for ch in chats:
@@ -113,12 +139,13 @@ async def kwork_new(req, c) -> list[dict]:
             set_seen(c, key, t)
             continue
         hist = await kwork_history(req, ch["USERID"], ch["username"])
-        new = [m for m in hist if not m["mine"] and m["time"] > before]
+        new = unanswered_msgs(hist, before)
         if new:
             subject = next((re.sub(r"^Добрый день\. Тема: ", "", m["text"]) for m in hist if "Тема:" in m["text"]), "")
             out.append({"site": "kwork", "key": key, "peer": ch["username"], "peer_id": ch["USERID"],
                         "subject": subject[:120], "url": f"https://kwork.ru/inbox/{ch['username']}",
-                        "history": hist[-HISTORY:], "new": new, "last": t})
+                        "history": hist[-HISTORY:], "new": new, "last": t,
+                        "moderated": dialog_state(ch) == "moderated"})
         else:
             set_seen(c, key, t)
     if first:
@@ -160,7 +187,7 @@ async def fl_new(req, c) -> list[dict]:
                  "files": [{"name": f.get("name") or f.get("original_name") or "файл", "url": f.get("url") or f.get("link")}
                            for f in (m.get("files") or []) if f.get("url") or f.get("link")]}
                 for m in sorted((await r.json())["items"], key=lambda m: m["time"])]
-        new = [m for m in hist if not m["mine"] and m["time"] > before]
+        new = unanswered_msgs(hist, before)
         if new:
             out.append({"site": "fl", "key": key, "peer": "заказчик", "subject": it.get("title", "")[:120],
                         "project_id": it["project_id"], "offer_id": it["id"],
@@ -359,14 +386,23 @@ def card(item: dict, text: str, status: str = "new") -> str:
             lines.append(f"\n❗ проверь: {e(', '.join(probs))}")
     if status == "sent":
         lines.append("\n✅ <b>Отправлено</b>")
+    elif status == "queued":
+        lines.append("\n⏳ <b>В очереди</b>: отправлю, как только Kwork откроет диалог (проверяю каждые 2 минуты).")
+    elif item.get("moderated"):
+        lines.append(f"\n{MODERATED_NOTE}")
     return "\n".join(lines)[:4000]
 
 
-def keyboard(item_id: int, url: str, sendable: bool = True) -> InlineKeyboardMarkup:
+MODERATED_NOTE = ("⏸ <b>Kwork проверяет заказчика</b> (обычно ~2 ч, с 9 до 21 по Москве) — ответить пока нельзя. "
+                  "«⏳ Отправить, когда откроют» — ответ уйдёт сам в первую же минуту после проверки.")
+
+
+def keyboard(item_id: int, url: str, sendable: bool = True, moderated: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if sendable:
-        rows.append([InlineKeyboardButton(text="🚀 Отправить", callback_data=f"cs:{item_id}"),
-                     InlineKeyboardButton(text="✏️ Править", callback_data=f"ce:{item_id}")])
+        send = (InlineKeyboardButton(text="⏳ Отправить, когда откроют", callback_data=f"cq:{item_id}") if moderated
+                else InlineKeyboardButton(text="🚀 Отправить", callback_data=f"cs:{item_id}"))
+        rows.append([send, InlineKeyboardButton(text="✏️ Править", callback_data=f"ce:{item_id}")])
     rows.append([InlineKeyboardButton(text="✍️ Свой текст", callback_data=f"co:{item_id}"),
                  InlineKeyboardButton(text="🙈 Без ответа", callback_data=f"cx:{item_id}")])
     rows.append([InlineKeyboardButton(text="Открыть чат", url=url)])
@@ -375,7 +411,8 @@ def keyboard(item_id: int, url: str, sendable: bool = True) -> InlineKeyboardMar
 
 async def post_card(bot, chat: int, c, item_id: int, item: dict, text: str):
     sent = await bot.send_message(chat, card(item, text), parse_mode="HTML", disable_web_page_preview=True,
-                                  reply_markup=keyboard(item_id, item["url"], not text.startswith("НЕ НУЖЕН")))
+                                  reply_markup=keyboard(item_id, item["url"], not text.startswith("НЕ НУЖЕН"),
+                                                        bool(item.get("moderated"))))
     c.execute("update chat_items set draft=?, status='new' where id=?", (text, item_id))
     c.execute("insert or replace into chat_msgs values (?,?)", (sent.message_id, item_id))
     c.commit()
@@ -508,6 +545,100 @@ async def recover_stuck(bot, chat: int):
                                      + " Карточка выше — можно отправить снова.")
 
 
+# ---------- очередь: ответы, которые ждут конца проверки заказчика на Kwork ----------
+QUEUE_END_HOUR = int(os.getenv("QUEUE_END_HOUR") or 1)  # 01:00 НСК = 21:00 МСК — позже Kwork заказчиков не проверяет
+queue_only = False             # после 22:00: следим только за очередью (новые сообщения и заказы — утром)
+
+
+def in_queue_hours(now: datetime | None = None) -> bool:
+    """С конца рабочего дня (22:00 НСК) до 01:00 НСК бот может работать — только ради очереди."""
+    h = (now or datetime.now(fl_watch.NSK)).astimezone(fl_watch.NSK).hour
+    return h >= fl_watch._work_bounds()[1] or h < QUEUE_END_HOUR
+
+
+def queued_count() -> int:
+    return db().execute("select count(*) from chat_items where status='queued'").fetchone()[0]
+
+
+async def kwork_states(peer_ids) -> dict[int, str] | None:
+    """Состояние диалогов Kwork по USERID заказчиков (open / moderated / closed). None — Chrome или Kwork недоступны."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(CDP, timeout=8000)
+            try:
+                chats = await kwork_chats(browser.contexts[0].request)
+            finally:
+                await browser.close()
+    except Exception:
+        log.warning("не получил список диалогов Kwork", exc_info=True)
+        return None
+    by = {int(ch["USERID"]): dialog_state(ch) for ch in chats if ch.get("USERID")}
+    return {int(pid): by.get(int(pid), "open") for pid in peer_ids}
+
+
+def queued_kb(item_id: int, url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✖️ Убрать из очереди", callback_data=f"cu:{item_id}")],
+        [InlineKeyboardButton(text="Открыть чат", url=url)]])
+
+
+async def process_queue(bot, chat: int) -> int:
+    """Диалоги Kwork «на проверке»: открыли — отправляем ответ из очереди (или пишем «можно отвечать», если в очередь
+    не ставили); Kwork закрыл диалог насовсем — снимаем из очереди и говорим об этом. Возвращает, сколько отправлено."""
+    c = db()
+    watch = []
+    for item_id, ij, text, status in c.execute(
+            "select id, item_json, draft, status from chat_items where status in ('queued', 'new')").fetchall():
+        item = json.loads(ij)
+        if item.get("site") == "kwork" and (status == "queued" or item.get("moderated")):
+            watch.append((item_id, item, text, status))
+    if not watch:
+        return 0
+    states = await kwork_states({it["peer_id"] for _, it, _, _ in watch})
+    if states is None:
+        return 0
+    sent = 0
+    for item_id, item, text, status in watch:
+        st = states.get(int(item["peer_id"]), "open")
+        if st == "moderated":
+            continue
+        item["moderated"] = False
+        c.execute("update chat_items set item_json=? where id=?", (json.dumps(item, ensure_ascii=False), item_id))
+        c.commit()
+        chat_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть чат", url=item["url"])]])
+        if st == "closed":
+            c.execute("update chat_items set status='skipped' where id=?", (item_id,))
+            c.commit()
+            await bot.send_message(chat, f"🚫 Kwork закрыл переписку с {item['peer']} — написать ему нельзя"
+                                         + (", ответ из очереди не отправлен." if status == "queued" else "."),
+                                   reply_markup=chat_btn)
+            continue
+        if status != "queued":
+            await bot.send_message(chat, f"🔓 Kwork открыл диалог с {item['peer']} — можно отвечать.",
+                                   reply_markup=keyboard(item_id, item["url"]))
+            continue
+        c.execute("update chat_items set status='sending' where id=?", (item_id,))
+        c.commit()
+        try:
+            ok = await send_reply(item, text)
+        except Exception:
+            log.exception("отправка из очереди")
+            ok = None
+        if ok:
+            c.execute("update chat_items set status='sent' where id=?", (item_id,))
+            c.commit()
+            sent += 1
+            await bot.send_message(chat, f"✅ Kwork открыл диалог с {item['peer']} — ответ из очереди отправлен.",
+                                   reply_markup=chat_btn)
+        else:
+            c.execute("update chat_items set status='new' where id=?", (item_id,))
+            c.commit()
+            await bot.send_message(chat, f"⚠️ Kwork открыл диалог с {item['peer']}, но ответ из очереди, возможно, не ушёл "
+                                         "— открой чат и проверь, прежде чем отправлять снова.",
+                                   reply_markup=keyboard(item_id, item["url"]))
+    return sent
+
+
 async def watch_forever(bot, chat: int, every: int = int(os.getenv("INBOX_EVERY_SEC") or 120)):
     try:
         await recover_stuck(bot, chat)
@@ -515,17 +646,25 @@ async def watch_forever(bot, chat: int, every: int = int(os.getenv("INBOX_EVERY_
         log.exception("зависшие ответы")
     while True:
         try:
-            n = await run_once(bot, chat)
-            if n:
-                log.info("новых сообщений от заказчиков: %s", n)
+            if await process_queue(bot, chat):
+                log.info("отправлено ответов из очереди Kwork")
         except Exception:
-            log.exception("проверка сообщений")
+            log.exception("очередь ответов Kwork")
+        if not queue_only:
+            try:
+                n = await run_once(bot, chat)
+                if n:
+                    log.info("новых сообщений от заказчиков: %s", n)
+            except Exception:
+                log.exception("проверка сообщений")
         await asyncio.sleep(every)
 
 
 # ---------- кнопки и ответы в Telegram ----------
-@router.callback_query(F.data.startswith("cs:"))
+@router.callback_query(F.data.startswith("cs:") | F.data.startswith("cq:"))
 async def on_send(cb: CallbackQuery):
+    """«🚀 Отправить» и «⏳ Отправить, когда откроют»: если Kwork сейчас проверяет заказчика — ставим ответ в очередь
+    (уйдёт сам, как только диалог откроют), иначе отправляем сразу."""
     item_id = int(cb.data[3:])
     c = db()
     got = load(c, item_id)
@@ -533,9 +672,28 @@ async def on_send(cb: CallbackQuery):
         await ack(cb, "Не нашёл это сообщение", show_alert=True)
         return
     item, text, status = got
-    if status in ("sending", "sent"):
-        await ack(cb, "Уже отправлено или отправляется", show_alert=True)
+    if status in ("sending", "sent", "queued"):
+        await ack(cb, "Уже отправлено, отправляется или стоит в очереди", show_alert=True)
         return
+    if item["site"] == "kwork":
+        states = await kwork_states([item["peer_id"]])
+        st = (states or {}).get(int(item["peer_id"]))
+        if st == "closed":
+            await ack(cb, "Kwork закрыл диалог с этим заказчиком — написать ему нельзя", show_alert=True)
+            return
+        if st == "moderated" or (states is None and item.get("moderated")):
+            item["moderated"] = True
+            c.execute("update chat_items set status='queued', item_json=? where id=?",
+                      (json.dumps(item, ensure_ascii=False), item_id))
+            c.commit()
+            await ack(cb, "Kwork проверяет заказчика — поставил ответ в очередь")
+            try:
+                await cb.message.edit_text(card(item, text, "queued"), parse_mode="HTML", disable_web_page_preview=True,
+                                           reply_markup=queued_kb(item_id, item["url"]))
+            except Exception:
+                await cb.message.answer("⏳ Ответ в очереди: отправлю, как только Kwork откроет диалог.",
+                                        reply_markup=queued_kb(item_id, item["url"]))
+            return
     c.execute("update chat_items set status='sending' where id=?", (item_id,))
     c.commit()
     await ack(cb, "Отправляю…")
@@ -557,6 +715,22 @@ async def on_send(cb: CallbackQuery):
     why = f"ошибка: {err}" if ok is None else "кнопку нажал, но в чате сообщения не вижу"
     await cb.message.answer(f"⚠️ Ответ, возможно, не ушёл ({why}). Открой чат и проверь, прежде чем отправлять снова.",
                             reply_markup=keyboard(item_id, item["url"]))
+
+
+@router.callback_query(F.data.startswith("cu:"))
+async def on_unqueue(cb: CallbackQuery):
+    item_id = int(cb.data[3:])
+    c = db()
+    got = load(c, item_id)
+    if not got or got[2] != "queued":
+        await ack(cb, "Этого ответа в очереди уже нет", show_alert=True)
+        return
+    item, text, _ = got
+    c.execute("update chat_items set status='new' where id=?", (item_id,))
+    c.commit()
+    await ack(cb, "Убрал из очереди")
+    await cb.message.edit_text(card(item, text), parse_mode="HTML", disable_web_page_preview=True,
+                               reply_markup=keyboard(item_id, item["url"], True, bool(item.get("moderated"))))
 
 
 @router.callback_query(F.data.startswith("ce:") | F.data.startswith("co:"))
